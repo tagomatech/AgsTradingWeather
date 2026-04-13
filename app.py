@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import threading
+
 from dash import Dash, Input, Output, dash_table, dcc, html
 
 from agstradingapp.analytics import (
@@ -303,4 +306,11 @@ def refresh_dashboard(scope: str, map_param: str):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="127.0.0.1", port=8052)
+    debug = os.getenv("AGSTRADINGAPP_DEBUG", "1").lower() in {"1", "true", "yes", "on"}
+    use_reloader = debug and threading.current_thread() is threading.main_thread()
+    app.run(
+        debug=debug,
+        host="127.0.0.1",
+        port=8052,
+        use_reloader=use_reloader,
+    )
