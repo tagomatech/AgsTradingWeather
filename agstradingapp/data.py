@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import CropDefinition, PALM_OIL
+from .config import CountryDefinition, CropDefinition, PALM_OIL
 from .domain import build_param_dictionary
 
 
@@ -15,6 +15,7 @@ from .domain import build_param_dictionary
 class CropDataset:
     crop: CropDefinition
     raw: pd.DataFrame
+    geo_daily: pd.DataFrame
     country_daily: pd.DataFrame
     param_dictionary: pd.DataFrame
     current_date: pd.Timestamp
@@ -38,12 +39,14 @@ def load_dataset(crop: CropDefinition = PALM_OIL) -> CropDataset:
 
     prepared = prepare_weather_frame(raw)
     current_date = prepared["date_release"].max().normalize()
-    country_daily = reduce_to_country_level(prepared, crop=crop, current_date=current_date)
-    param_dictionary = build_param_dictionary(country_daily["param"].unique())
+    geo_daily = enrich_geo_daily(prepared, crop=crop, current_date=current_date)
+    country_daily = reduce_to_country_level(geo_daily, crop=crop, current_date=current_date)
+    param_dictionary = build_param_dictionary(geo_daily["param"].unique())
 
     return CropDataset(
         crop=crop,
         raw=prepared,
+        geo_daily=geo_daily,
         country_daily=country_daily,
         param_dictionary=param_dictionary,
         current_date=current_date,
@@ -87,66 +90,163 @@ def prepare_weather_frame(raw: pd.DataFrame) -> pd.DataFrame:
     frame["param"] = frame["param"].astype(str)
     frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
     frame = frame.dropna(subset=["date", "date_release", "param", "geo", "value"])
-
     frame = frame.sort_values(["date", "date_release", "param", "geo"])
     frame = frame.groupby(["date", "geo", "param"], as_index=False).tail(1)
     return frame.reset_index(drop=True)
 
 
-def reduce_to_country_level(
+def empty_geo_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "date",
+            "date_release",
+            "year_market",
+            "country_code",
+            "country_label",
+            "iso_alpha3",
+            "geo",
+            "geo_label",
+            "geo_level",
+            "geo_weight",
+            "param",
+            "value",
+            "period",
+        ]
+    )
+
+
+def enrich_geo_daily(
     prepared: pd.DataFrame,
     crop: CropDefinition,
     current_date: pd.Timestamp,
 ) -> pd.DataFrame:
+    available_geos = set(crop.all_geo_codes)
     country_lookup = crop.country_lookup
-    records: list[dict[str, object]] = []
+    region_lookup = crop.region_lookup
+    region_country_lookup = crop.region_country_lookup
 
-    filtered = prepared[prepared["country_code"].isin(crop.country_codes)].copy()
+    filtered = prepared[prepared["geo"].isin(available_geos)].copy()
     if filtered.empty:
-        return pd.DataFrame(
-            columns=[
-                "date",
-                "date_release",
-                "year_market",
-                "country_code",
-                "country_label",
-                "iso_alpha3",
-                "param",
-                "value",
-                "period",
-            ]
-        )
+        return empty_geo_frame()
 
-    for (date_value, country_code, param), group in filtered.groupby(
-        ["date", "country_code", "param"], sort=True
+    geo_level: list[str] = []
+    geo_label: list[str] = []
+    geo_weight: list[float] = []
+    country_label: list[str] = []
+    iso_alpha3: list[str] = []
+
+    for geo in filtered["geo"]:
+        if geo in country_lookup:
+            country = country_lookup[geo]
+            geo_level.append("country")
+            geo_label.append(country.label)
+            geo_weight.append(100.0)
+        else:
+            region = region_lookup[geo]
+            country = region_country_lookup[geo]
+            geo_level.append("region")
+            geo_label.append(region.label)
+            geo_weight.append(region.weight)
+
+        country_label.append(country.label)
+        iso_alpha3.append(country.iso_alpha3)
+
+    filtered["country_label"] = country_label
+    filtered["iso_alpha3"] = iso_alpha3
+    filtered["geo_level"] = geo_level
+    filtered["geo_label"] = geo_label
+    filtered["geo_weight"] = geo_weight
+    filtered["period"] = np.where(filtered["date"] > current_date, "forecast", "actual")
+
+    return filtered[
+        [
+            "date",
+            "date_release",
+            "year_market",
+            "country_code",
+            "country_label",
+            "iso_alpha3",
+            "geo",
+            "geo_label",
+            "geo_level",
+            "geo_weight",
+            "param",
+            "value",
+            "period",
+        ]
+    ].sort_values(["date", "geo", "param"]).reset_index(drop=True)
+
+
+def reduce_to_country_level(
+    geo_daily: pd.DataFrame,
+    crop: CropDefinition,
+    current_date: pd.Timestamp,
+) -> pd.DataFrame:
+    if geo_daily.empty:
+        return empty_geo_frame()
+
+    records: list[dict[str, object]] = []
+    for (date_value, country_code, param), group in geo_daily.groupby(
+        ["date", "country_code", "param"],
+        sort=True,
     ):
-        exact_country = group[group["geo"] == country_code]
-        selected = exact_country if not exact_country.empty else group
-        country = country_lookup[country_code]
+        exact = group[group["geo"] == country_code]
+        country = crop.country_lookup[country_code]
 
-        year_market_values = selected["year_market"].dropna()
-        year_market = int(year_market_values.iloc[-1]) if not year_market_values.empty else None
+        if not exact.empty:
+            selected = exact.iloc[-1]
+            records.append(
+                {
+                    "date": selected["date"],
+                    "date_release": selected["date_release"],
+                    "year_market": selected["year_market"],
+                    "country_code": country.code,
+                    "country_label": country.label,
+                    "iso_alpha3": country.iso_alpha3,
+                    "geo": country.code,
+                    "geo_label": country.label,
+                    "geo_level": "country",
+                    "geo_weight": 100.0,
+                    "param": param,
+                    "value": float(selected["value"]),
+                    "period": "forecast" if selected["date"] > current_date else "actual",
+                }
+            )
+            continue
 
+        regional = group[group["geo_level"] == "region"].copy()
+        if regional.empty:
+            continue
+
+        weights = regional["geo_weight"].astype(float)
+        weighted_value = (
+            float(np.average(regional["value"], weights=weights))
+            if float(weights.sum()) > 0
+            else float(regional["value"].mean())
+        )
         records.append(
             {
                 "date": date_value,
-                "date_release": selected["date_release"].max(),
-                "year_market": year_market,
+                "date_release": regional["date_release"].max(),
+                "year_market": regional["year_market"].dropna().iloc[-1]
+                if not regional["year_market"].dropna().empty
+                else None,
                 "country_code": country.code,
                 "country_label": country.label,
                 "iso_alpha3": country.iso_alpha3,
+                "geo": country.code,
+                "geo_label": country.label,
+                "geo_level": "country",
+                "geo_weight": 100.0,
                 "param": param,
-                "value": selected["value"].mean(),
+                "value": weighted_value,
+                "period": "forecast" if date_value > current_date else "actual",
             }
         )
 
-    country_daily = pd.DataFrame.from_records(records)
-    country_daily["period"] = np.where(
-        country_daily["date"] > current_date,
-        "forecast",
-        "actual",
-    )
-    return country_daily.sort_values(["date", "country_code", "param"]).reset_index(drop=True)
+    return pd.DataFrame.from_records(records).sort_values(
+        ["date", "geo", "param"]
+    ).reset_index(drop=True)
 
 
 def generate_sample_weather(crop: CropDefinition) -> pd.DataFrame:
@@ -161,46 +261,103 @@ def generate_sample_weather(crop: CropDefinition) -> pd.DataFrame:
     dates = pd.date_range(start_date, as_of + pd.Timedelta(days=forecast_horizon), freq="D")
     day_of_year = dates.dayofyear.to_numpy()
     years_since_start = (dates.year - start_date.year).to_numpy()
-    rng = np.random.default_rng(14)
 
+    country_arrays: dict[tuple[str, str], dict[str, np.ndarray]] = {}
     records: list[dict[str, object]] = []
+
+    for country_index, country in enumerate(crop.countries):
+        region_arrays: dict[str, dict[str, np.ndarray]] = {}
+        for region_index, region in enumerate(country.regions):
+            phase_shift = 18 if country.code == "mys" else 0
+            seasonal_cycle = 0.55 * np.sin((2 * np.pi * (day_of_year + phase_shift)) / 365.25)
+            sub_seasonal_cycle = 0.25 * np.cos((4 * np.pi * (day_of_year + phase_shift)) / 365.25)
+            climate_trend = years_since_start * 0.018
+            recent_heat_pulse = np.where(
+                (dates >= as_of - pd.Timedelta(days=10)) & (dates <= as_of + pd.Timedelta(days=5)),
+                0.85 if country.code == "idn" else 0.45,
+                0.0,
+            )
+            forecast_cooling = np.where(
+                dates > as_of,
+                np.linspace(0.2, -0.25, len(dates)),
+                0.0,
+            )
+
+            regional_wave = 0.18 * np.sin(
+                (2 * np.pi * (day_of_year + (region_index + 1) * 11 + country_index * 7)) / 365.25
+            )
+            regional_offset = ((region_index % 5) - 2) * 0.12
+            deterministic_noise = 0.08 * np.cos(
+                (2 * np.pi * (day_of_year + (region_index + 3) * 17)) / 31.0
+            )
+
+            mean_temp = (
+                (27.15 if country.code == "idn" else 26.65)
+                + seasonal_cycle
+                + sub_seasonal_cycle
+                + climate_trend
+                + recent_heat_pulse
+                + forecast_cooling
+                + regional_wave
+                + regional_offset
+                + deterministic_noise
+            )
+            max_temp = mean_temp + 4.2 + 0.18 * np.sin((2 * np.pi * day_of_year) / 29.0)
+            min_temp = mean_temp - 4.0 + 0.16 * np.cos((2 * np.pi * day_of_year) / 23.0)
+
+            region_arrays[region.geo] = {
+                "palmoil-t2m_mean-degree_c": mean_temp,
+                "palmoil-t2m_max-degree_c": max_temp,
+                "palmoil-t2m_min-degree_c": min_temp,
+            }
+
+            for param, values in region_arrays[region.geo].items():
+                for date_value, value in zip(dates, values, strict=True):
+                    if date_value <= as_of:
+                        records.append(
+                            {
+                                "date": date_value,
+                                "date_release": date_value,
+                                "year_market": date_value.year,
+                                "param": param,
+                                "geo": region.geo,
+                                "value": float(value),
+                            }
+                        )
+                    else:
+                        records.append(
+                            {
+                                "date": date_value,
+                                "date_release": as_of - pd.Timedelta(days=1),
+                                "year_market": date_value.year,
+                                "param": param,
+                                "geo": region.geo,
+                                "value": float(value - 0.12),
+                            }
+                        )
+                        records.append(
+                            {
+                                "date": date_value,
+                                "date_release": as_of,
+                                "year_market": date_value.year,
+                                "param": param,
+                                "geo": region.geo,
+                                "value": float(value),
+                            }
+                        )
+
+        weights = np.array([region.weight for region in country.regions], dtype=float)
+        for param in crop.params:
+            stacked = np.vstack([region_arrays[region.geo][param] for region in country.regions])
+            country_arrays[(country.code, param)] = {
+                "current": np.average(stacked, axis=0, weights=weights),
+                "previous": np.average(stacked - 0.12, axis=0, weights=weights),
+            }
+
     for country in crop.countries:
-        phase_shift = 18 if country.code == "mys" else 0
-        seasonal_cycle = 0.55 * np.sin((2 * np.pi * (day_of_year + phase_shift)) / 365.25)
-        sub_seasonal_cycle = 0.25 * np.cos((4 * np.pi * (day_of_year + phase_shift)) / 365.25)
-        climate_trend = years_since_start * 0.018
-        recent_heat_pulse = np.where(
-            (dates >= as_of - pd.Timedelta(days=10)) & (dates <= as_of + pd.Timedelta(days=5)),
-            0.85 if country.code == "idn" else 0.45,
-            0.0,
-        )
-        forecast_cooling = np.where(
-            dates > as_of,
-            np.linspace(0.2, -0.25, len(dates)),
-            0.0,
-        )
-
-        mean_noise = rng.normal(loc=0.0, scale=0.28, size=len(dates))
-        mean_temp = (
-            (27.15 if country.code == "idn" else 26.65)
-            + seasonal_cycle
-            + sub_seasonal_cycle
-            + climate_trend
-            + recent_heat_pulse
-            + forecast_cooling
-            + mean_noise
-        )
-        max_temp = mean_temp + 4.2 + rng.normal(loc=0.0, scale=0.24, size=len(dates))
-        min_temp = mean_temp - 4.0 + rng.normal(loc=0.0, scale=0.20, size=len(dates))
-
-        series_by_param = {
-            "palmoil-t2m_mean-degree_c": mean_temp,
-            "palmoil-t2m_max-degree_c": max_temp,
-            "palmoil-t2m_min-degree_c": min_temp,
-        }
-
-        for param, values in series_by_param.items():
-            for date_value, value in zip(dates, values, strict=True):
+        for param in crop.params:
+            payload = country_arrays[(country.code, param)]
+            for idx, date_value in enumerate(dates):
                 if date_value <= as_of:
                     records.append(
                         {
@@ -209,7 +366,7 @@ def generate_sample_weather(crop: CropDefinition) -> pd.DataFrame:
                             "year_market": date_value.year,
                             "param": param,
                             "geo": country.code,
-                            "value": float(value),
+                            "value": float(payload["current"][idx]),
                         }
                     )
                 else:
@@ -220,7 +377,7 @@ def generate_sample_weather(crop: CropDefinition) -> pd.DataFrame:
                             "year_market": date_value.year,
                             "param": param,
                             "geo": country.code,
-                            "value": float(value - 0.12),
+                            "value": float(payload["previous"][idx]),
                         }
                     )
                     records.append(
@@ -230,7 +387,7 @@ def generate_sample_weather(crop: CropDefinition) -> pd.DataFrame:
                             "year_market": date_value.year,
                             "param": param,
                             "geo": country.code,
-                            "value": float(value),
+                            "value": float(payload["current"][idx]),
                         }
                     )
 

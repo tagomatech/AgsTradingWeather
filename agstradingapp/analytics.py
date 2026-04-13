@@ -9,19 +9,31 @@ from .config import CropDefinition
 from .domain import STATISTIC_ORDER, parse_param_label
 
 
-def filter_snapshot(snapshot: pd.DataFrame, scope: str) -> pd.DataFrame:
+def is_country_scope(scope: str, crop: CropDefinition) -> bool:
+    return scope in crop.country_codes
+
+
+def is_region_scope(scope: str, crop: CropDefinition) -> bool:
+    return scope in crop.region_lookup
+
+
+def filter_snapshot(snapshot: pd.DataFrame, scope: str, crop: CropDefinition) -> pd.DataFrame:
+    if snapshot.empty:
+        return snapshot
     if scope == "all":
-        return snapshot.copy()
-    return snapshot[snapshot["country_code"] == scope].copy()
+        return snapshot[snapshot["geo_level"] == "country"].copy()
+    if is_country_scope(scope, crop):
+        return snapshot[snapshot["country_code"] == scope].copy()
+    return snapshot[snapshot["geo"] == scope].copy()
 
 
-def build_snapshot(country_daily: pd.DataFrame, current_date: pd.Timestamp) -> pd.DataFrame:
-    actual = country_daily[country_daily["date"] <= current_date].copy()
+def build_snapshot(geo_daily: pd.DataFrame, current_date: pd.Timestamp) -> pd.DataFrame:
+    actual = geo_daily[geo_daily["date"] <= current_date].copy()
     if actual.empty:
         return pd.DataFrame()
 
     records: list[dict[str, object]] = []
-    for (country_code, param), group in actual.groupby(["country_code", "param"], sort=True):
+    for (geo, param), group in actual.groupby(["geo", "param"], sort=True):
         group = group.sort_values("date")
         latest_date = group["date"].max()
         current_window = group[group["date"].between(latest_date - pd.Timedelta(days=6), latest_date)]
@@ -57,7 +69,11 @@ def build_snapshot(country_daily: pd.DataFrame, current_date: pd.Timestamp) -> p
 
         records.append(
             {
-                "country_code": country_code,
+                "geo": geo,
+                "geo_label": group["geo_label"].iloc[0],
+                "geo_level": group["geo_level"].iloc[0],
+                "geo_weight": float(group["geo_weight"].iloc[0]),
+                "country_code": group["country_code"].iloc[0],
                 "country_label": group["country_label"].iloc[0],
                 "iso_alpha3": group["iso_alpha3"].iloc[0],
                 "param": param,
@@ -72,6 +88,7 @@ def build_snapshot(country_daily: pd.DataFrame, current_date: pd.Timestamp) -> p
                 "issue_flag": classify_issue(zscore),
                 "unit_label": descriptor.unit_label,
                 "stat_order": STATISTIC_ORDER.get(descriptor.statistic_code, 99),
+                "level_order": 0 if group["geo_level"].iloc[0] == "country" else 1,
             }
         )
 
@@ -80,7 +97,8 @@ def build_snapshot(country_daily: pd.DataFrame, current_date: pd.Timestamp) -> p
         return snapshot
 
     return snapshot.sort_values(
-        ["country_label", "stat_order", "metric_label"]
+        ["country_label", "level_order", "geo_weight", "stat_order", "metric_label"],
+        ascending=[True, True, False, True, True],
     ).reset_index(drop=True)
 
 
@@ -104,26 +122,31 @@ def build_kpi_summary(
     scope: str,
     current_date: pd.Timestamp,
 ) -> list[dict[str, str]]:
-    scoped = filter_snapshot(snapshot, scope)
+    scoped = filter_snapshot(snapshot, scope, crop)
     if scoped.empty:
         return []
 
     warm_count = int(scoped["zscore"].ge(1.0).sum())
     cool_count = int(scoped["zscore"].le(-1.0).sum())
     top_signal = scoped.sort_values("abs_zscore", ascending=False).iloc[0]
-    scope_label = (
-        f"{len(crop.countries)} countries / {len(crop.params)} metrics"
-        if scope == "all"
-        else f"{top_signal['country_label']} focus / {len(crop.params)} metrics"
-    )
+
+    if scope == "all":
+        coverage = f"{len(crop.countries)} country cuts / {scoped['param'].nunique()} metrics"
+        coverage_detail = "Core belt overview"
+    elif is_country_scope(scope, crop):
+        coverage = f"{scoped['geo'].nunique()} geos / {scoped['param'].nunique()} metrics"
+        coverage_detail = crop.country_lookup[scope].label
+    else:
+        coverage = f"{scoped['geo'].nunique()} geo / {scoped['param'].nunique()} metrics"
+        coverage_detail = top_signal["country_label"]
 
     top_signal_text = (
-        f"{top_signal['country_label']} {top_signal['metric_label']} "
+        f"{top_signal['geo_label']} {top_signal['metric_label']} "
         f"{top_signal['anomaly']:+.2f} {top_signal['unit_label']}"
     )
 
     return [
-        {"label": "Coverage", "value": scope_label, "detail": crop.label},
+        {"label": "Coverage", "value": coverage, "detail": coverage_detail},
         {
             "label": "Current Cut",
             "value": current_date.strftime("%d %b %Y"),
@@ -142,14 +165,106 @@ def build_kpi_summary(
     ]
 
 
+def aggregate_scope_series(
+    country_daily: pd.DataFrame,
+    geo_daily: pd.DataFrame,
+    crop: CropDefinition,
+    scope: str,
+    current_date: pd.Timestamp,
+) -> tuple[pd.DataFrame, str]:
+    if scope == "all":
+        weights = crop.country_weights
+        scoped = country_daily[country_daily["country_code"].isin(weights)].copy()
+        if scoped.empty:
+            return scoped, f"{crop.label} core belt"
+
+        scoped["weight"] = scoped["country_code"].map(weights)
+        records: list[dict[str, object]] = []
+        for (date_value, param), group in scoped.groupby(["date", "param"], sort=True):
+            available_weight = float(group["weight"].sum())
+            weighted_value = (
+                float(np.average(group["value"], weights=group["weight"]))
+                if available_weight > 0
+                else float(group["value"].mean())
+            )
+            records.append(
+                {
+                    "date": date_value,
+                    "date_release": group["date_release"].max(),
+                    "param": param,
+                    "value": weighted_value,
+                    "period": "forecast" if date_value > current_date else "actual",
+                }
+            )
+        return pd.DataFrame.from_records(records), f"{crop.label} core belt"
+
+    if is_country_scope(scope, crop):
+        scoped = country_daily[country_daily["country_code"] == scope].copy()
+        label = crop.country_lookup[scope].label if not scoped.empty else scope.upper()
+        return scoped, label
+
+    scoped = geo_daily[geo_daily["geo"] == scope].copy()
+    if scoped.empty:
+        return scoped, scope
+    return scoped, scoped["geo_label"].iloc[0]
+
+
+def build_recent_context(
+    country_daily: pd.DataFrame,
+    geo_daily: pd.DataFrame,
+    crop: CropDefinition,
+    scope: str,
+    current_date: pd.Timestamp,
+    lookback_days: int = 120,
+    forward_days: int = 15,
+) -> tuple[pd.DataFrame, str]:
+    scoped, scope_label = aggregate_scope_series(
+        country_daily=country_daily,
+        geo_daily=geo_daily,
+        crop=crop,
+        scope=scope,
+        current_date=current_date,
+    )
+    if scoped.empty:
+        return scoped, scope_label
+
+    window_start = current_date - pd.Timedelta(days=lookback_days)
+    window_end = current_date + pd.Timedelta(days=forward_days)
+    scoped = scoped.copy()
+    scoped["month_day"] = scoped["date"].dt.strftime("%m-%d")
+
+    reference = (
+        scoped[scoped["date"].dt.year < current_date.year]
+        .groupby(["param", "month_day"])["value"]
+        .agg(
+            clim_mean="mean",
+            clim_q10=lambda series: series.quantile(0.10),
+            clim_q90=lambda series: series.quantile(0.90),
+        )
+        .reset_index()
+    )
+
+    recent = scoped[scoped["date"].between(window_start, window_end)].copy()
+    recent = recent.merge(reference, on=["param", "month_day"], how="left")
+    return recent.sort_values(["param", "date"]).reset_index(drop=True), scope_label
+
+
 def build_monthly_issue_matrix(
     country_daily: pd.DataFrame,
+    geo_daily: pd.DataFrame,
     crop: CropDefinition,
     scope: str,
     current_date: pd.Timestamp,
     months: int = 15,
 ) -> pd.DataFrame:
-    actual = country_daily[country_daily["date"] <= current_date].copy()
+    scoped, scope_label = aggregate_scope_series(
+        country_daily=country_daily,
+        geo_daily=geo_daily,
+        crop=crop,
+        scope=scope,
+        current_date=current_date,
+    )
+    actual = scoped[scoped["date"] <= current_date].copy()
     if actual.empty:
         return pd.DataFrame()
 
@@ -160,21 +275,8 @@ def build_monthly_issue_matrix(
     )
 
     records: list[dict[str, object]] = []
-    if scope == "all":
-        group_fields = ["country_code", "country_label", "param"]
-    else:
-        actual = actual[actual["country_code"] == scope]
-        group_fields = ["param"]
-
-    for _, group in actual.groupby(group_fields, sort=True):
-        country_label = group["country_label"].iloc[0]
+    for _, group in actual.groupby(["param"], sort=True):
         descriptor = parse_param_label(group["param"].iloc[0])
-        row_label = (
-            f"{country_label} | {descriptor.short_label}"
-            if scope == "all"
-            else descriptor.short_label
-        )
-
         for month_start in month_starts:
             month_end = month_start + pd.offsets.MonthEnd(0)
             current_month = group[group["date"].between(month_start, month_end)]
@@ -202,7 +304,9 @@ def build_monthly_issue_matrix(
 
             records.append(
                 {
-                    "row_label": row_label,
+                    "scope_label": scope_label,
+                    "row_label": descriptor.short_label,
+                    "unit_label": descriptor.unit_label,
                     "month_label": month_start.strftime("%b\n%Y"),
                     "month_start": month_start,
                     "zscore": zscore,
@@ -214,81 +318,4 @@ def build_monthly_issue_matrix(
     matrix = pd.DataFrame.from_records(records)
     if matrix.empty:
         return matrix
-
     return matrix.sort_values(["row_label", "month_start"]).reset_index(drop=True)
-
-
-def aggregate_scope_series(
-    country_daily: pd.DataFrame,
-    crop: CropDefinition,
-    scope: str,
-    current_date: pd.Timestamp,
-) -> tuple[pd.DataFrame, str]:
-    if scope != "all":
-        scoped = country_daily[country_daily["country_code"] == scope].copy()
-        if scoped.empty:
-            return scoped, scope.upper()
-        return scoped, scoped["country_label"].iloc[0]
-
-    weights = crop.country_weights
-    scoped = country_daily[country_daily["country_code"].isin(weights)].copy()
-    if scoped.empty:
-        return scoped, f"{crop.label} core belt"
-
-    scoped["weight"] = scoped["country_code"].map(weights)
-    records: list[dict[str, object]] = []
-    for (date_value, param), group in scoped.groupby(["date", "param"], sort=True):
-        available_weight = float(group["weight"].sum())
-        weighted_value = (
-            float(np.average(group["value"], weights=group["weight"]))
-            if available_weight > 0
-            else float(group["value"].mean())
-        )
-        records.append(
-            {
-                "date": date_value,
-                "date_release": group["date_release"].max(),
-                "param": param,
-                "value": weighted_value,
-                "period": "forecast" if date_value > current_date else "actual",
-            }
-        )
-
-    return pd.DataFrame.from_records(records), f"{crop.label} core belt"
-
-
-def build_recent_context(
-    country_daily: pd.DataFrame,
-    crop: CropDefinition,
-    scope: str,
-    current_date: pd.Timestamp,
-    lookback_days: int = 120,
-    forward_days: int = 15,
-) -> tuple[pd.DataFrame, str]:
-    scoped, scope_label = aggregate_scope_series(
-        country_daily=country_daily,
-        crop=crop,
-        scope=scope,
-        current_date=current_date,
-    )
-    if scoped.empty:
-        return scoped, scope_label
-
-    window_start = current_date - pd.Timedelta(days=lookback_days)
-    window_end = current_date + pd.Timedelta(days=forward_days)
-    scoped["month_day"] = scoped["date"].dt.strftime("%m-%d")
-
-    reference = (
-        scoped[scoped["date"].dt.year < current_date.year]
-        .groupby(["param", "month_day"])["value"]
-        .agg(
-            clim_mean="mean",
-            clim_q10=lambda series: series.quantile(0.10),
-            clim_q90=lambda series: series.quantile(0.90),
-        )
-        .reset_index()
-    )
-
-    recent = scoped[scoped["date"].between(window_start, window_end)].copy()
-    recent = recent.merge(reference, on=["param", "month_day"], how="left")
-    return recent.sort_values(["param", "date"]).reset_index(drop=True), scope_label

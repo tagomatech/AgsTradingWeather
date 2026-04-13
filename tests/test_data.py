@@ -21,6 +21,14 @@ def test_load_dataset_prefers_local_csv(monkeypatch, tmp_path):
                 "date_release": "2026-04-12",
                 "year_market": 2026,
                 "param": "palmoil-t2m_mean-degree_c",
+                "geo": "idn-riau",
+                "value": 28.4,
+            },
+            {
+                "date": "2026-04-12",
+                "date_release": "2026-04-12",
+                "year_market": 2026,
+                "param": "palmoil-t2m_mean-degree_c",
                 "geo": "mys",
                 "value": 27.0,
             },
@@ -32,5 +40,6 @@ def test_load_dataset_prefers_local_csv(monkeypatch, tmp_path):
     dataset = load_dataset(PALM_OIL)
 
     assert dataset.source_mode == "csv"
+    assert not dataset.geo_daily.empty
     assert not dataset.country_daily.empty
     assert dataset.current_date == pd.Timestamp("2026-04-12")

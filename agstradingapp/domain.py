@@ -12,14 +12,26 @@ CROP_LABELS = {
 
 VARIABLE_LABELS = {
     "t2m": "2m air temperature",
+    "tp": "precipitation",
+    "prcp": "precipitation",
+    "precip": "precipitation",
+    "rain": "rainfall",
 }
 
 VARIABLE_SHORT_LABELS = {
     "t2m": "Temperature",
+    "tp": "Precipitation",
+    "prcp": "Precipitation",
+    "precip": "Precipitation",
+    "rain": "Rainfall",
 }
 
 SIGNAL_FAMILY = {
     "t2m": "temperature",
+    "tp": "precipitation",
+    "prcp": "precipitation",
+    "precip": "precipitation",
+    "rain": "precipitation",
 }
 
 STATISTIC_LABELS = {
