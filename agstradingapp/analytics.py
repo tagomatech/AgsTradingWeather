@@ -215,6 +215,7 @@ def build_recent_context(
     crop: CropDefinition,
     scope: str,
     current_date: pd.Timestamp,
+    focus_param: str | None = None,
     lookback_days: int = 120,
     forward_days: int = 15,
 ) -> tuple[pd.DataFrame, str]:
@@ -246,6 +247,8 @@ def build_recent_context(
 
     recent = scoped[scoped["date"].between(window_start, window_end)].copy()
     recent = recent.merge(reference, on=["param", "month_day"], how="left")
+    if focus_param:
+        recent = recent[recent["param"] == focus_param].copy()
     return recent.sort_values(["param", "date"]).reset_index(drop=True), scope_label
 
 
@@ -255,6 +258,7 @@ def build_monthly_issue_matrix(
     crop: CropDefinition,
     scope: str,
     current_date: pd.Timestamp,
+    focus_param: str | None = None,
     months: int = 15,
 ) -> pd.DataFrame:
     scoped, scope_label = aggregate_scope_series(
@@ -265,6 +269,8 @@ def build_monthly_issue_matrix(
         current_date=current_date,
     )
     actual = scoped[scoped["date"] <= current_date].copy()
+    if focus_param:
+        actual = actual[actual["param"] == focus_param].copy()
     if actual.empty:
         return pd.DataFrame()
 

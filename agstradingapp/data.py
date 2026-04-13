@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -25,16 +26,29 @@ class CropDataset:
 
 def load_dataset(crop: CropDefinition = PALM_OIL) -> CropDataset:
     csv_path = crop_csv_path(crop)
-    if csv_path.exists():
+    file_signature = csv_file_signature(csv_path)
+    return _load_dataset_cached(crop, str(csv_path) if csv_path else "", file_signature)
+
+
+@lru_cache(maxsize=8)
+def _load_dataset_cached(
+    crop: CropDefinition,
+    csv_path_text: str,
+    file_signature: tuple[int, int] | tuple[()],
+) -> CropDataset:
+    del file_signature
+
+    csv_path = Path(csv_path_text) if csv_path_text else None
+    if csv_path is not None:
         raw = load_csv_weather(csv_path)
         source_mode = "csv"
-        status_message = f"Loaded local CSV feed from data/{csv_path.name}."
+        status_message = f"Loaded local CSV feed from {describe_csv_path(csv_path)}."
     else:
         raw = generate_sample_weather(crop)
         source_mode = "sample"
         status_message = (
-            f"Using deterministic sample data. Drop {crop.data_filename} into data/ to use "
-            "the local feed."
+            f"Live CSV not found. Expected {crop.data_filename} in data/ or beside app.py; "
+            "using deterministic sample feed."
         )
 
     prepared = prepare_weather_frame(raw)
@@ -65,9 +79,41 @@ def data_dir() -> Path:
     return path
 
 
-def crop_csv_path(crop: CropDefinition) -> Path:
+def crop_csv_candidates(crop: CropDefinition) -> tuple[Path, ...]:
     override = os.getenv("AGSTRADINGAPP_DATA_FILE")
-    return Path(override) if override else data_dir() / crop.data_filename
+    candidates: list[Path] = []
+    if override:
+        candidates.append(Path(override))
+
+    candidates.append(data_dir() / crop.data_filename)
+    candidates.append(repo_root() / crop.data_filename)
+
+    cwd_candidate = Path.cwd() / crop.data_filename
+    if cwd_candidate not in candidates:
+        candidates.append(cwd_candidate)
+
+    return tuple(candidates)
+
+
+def crop_csv_path(crop: CropDefinition) -> Path | None:
+    for candidate in crop_csv_candidates(crop):
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def csv_file_signature(csv_path: Path | None) -> tuple[int, int] | tuple[()]:
+    if csv_path is None:
+        return ()
+    stat = csv_path.stat()
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def describe_csv_path(csv_path: Path) -> str:
+    try:
+        return str(csv_path.relative_to(repo_root()))
+    except ValueError:
+        return str(csv_path)
 
 
 def load_csv_weather(csv_path: Path) -> pd.DataFrame:
@@ -256,7 +302,7 @@ def generate_sample_weather(crop: CropDefinition) -> pd.DataFrame:
             pd.Timestamp.today().normalize().date().isoformat(),
         )
     )
-    start_date = pd.Timestamp("2005-01-01")
+    start_date = pd.Timestamp(os.getenv("WEATHER_SAMPLE_START", "2018-01-01"))
     forecast_horizon = 15
     dates = pd.date_range(start_date, as_of + pd.Timedelta(days=forecast_horizon), freq="D")
     day_of_year = dates.dayofyear.to_numpy()

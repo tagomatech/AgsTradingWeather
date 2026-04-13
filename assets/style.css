@@ -140,6 +140,8 @@ body {
 .toolbar {
   grid-template-columns: minmax(220px, 0.5fr) minmax(0, 1fr);
   align-items: start;
+  position: relative;
+  z-index: 20;
 }
 
 .control-block,
@@ -154,6 +156,9 @@ body {
 
 .control-block {
   padding: 18px;
+  position: relative;
+  overflow: visible;
+  z-index: 30;
 }
 
 .control-label,
@@ -234,6 +239,19 @@ body {
   border-radius: 16px !important;
   border: 1px solid rgba(43, 58, 48, 0.16) !important;
   background: var(--panel-strong) !important;
+}
+
+.dash-dropdown,
+.Select,
+.Select-menu-outer,
+.Select-menu {
+  position: relative;
+  z-index: 40;
+}
+
+.Select-menu-outer,
+.Select-menu {
+  z-index: 9999 !important;
 }
 
 .dash-graph {

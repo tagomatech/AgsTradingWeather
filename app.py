@@ -87,10 +87,13 @@ def render_kpi_cards(summary_cards: list[dict[str, str]]) -> list[html.Div]:
     return cards
 
 
-def build_issue_table_rows(scope: str) -> list[dict[str, str]]:
+def build_issue_table_rows(scope: str, focus_param: str | None = None) -> list[dict[str, str]]:
     scoped = filter_snapshot(SNAPSHOT, scope, PALM_OIL).sort_values(
         ["level_order", "abs_zscore", "geo_weight"], ascending=[True, False, False]
     )
+    if focus_param:
+        scoped = scoped[scoped["param"] == focus_param].copy()
+
     rows: list[dict[str, str]] = []
     for _, row in scoped.iterrows():
         rows.append(
@@ -243,7 +246,7 @@ app.layout = html.Div(
                                 html.Div(
                                     className="control-block",
                                     children=[
-                                        html.Div("Map metric", className="control-label"),
+                                        html.Div("Focus metric", className="control-label"),
                                         dcc.RadioItems(
                                             id="map-param-filter",
                                             options=MAP_OPTIONS,
@@ -378,6 +381,7 @@ def refresh_dashboard(scope: str, map_param: str):
         crop=PALM_OIL,
         scope=scope,
         current_date=DATASET.current_date,
+        focus_param=map_param,
     )
     monthly_matrix = build_monthly_issue_matrix(
         country_daily=DATASET.country_daily,
@@ -385,6 +389,7 @@ def refresh_dashboard(scope: str, map_param: str):
         crop=PALM_OIL,
         scope=scope,
         current_date=DATASET.current_date,
+        focus_param=map_param,
     )
 
     return (
@@ -392,7 +397,7 @@ def refresh_dashboard(scope: str, map_param: str):
         build_geo_overview_figure(SNAPSHOT, map_param, scope, PALM_OIL),
         build_recent_context_figure(recent_context, DATASET.current_date, scope_label),
         build_monthly_heatmap(monthly_matrix, scope_label),
-        build_issue_table_rows(scope),
+        build_issue_table_rows(scope, map_param),
     )
 
 
