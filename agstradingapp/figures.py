@@ -297,8 +297,8 @@ def build_recent_context_figure(
     return apply_layout(
         figure,
         title=(
-            f"{scope_label} | history, current cut, and 15-day forecast"
-            "<br><sup>Grey band shows the 10th-90th seasonal range; the dashed line marks the latest release date.</sup>"
+            f"{scope_label} | recent path and 15-day forecast"
+            "<br><sup>Grey band shows the 10th-90th range from prior years; the dashed line marks the latest release date.</sup>"
         ),
         height=max(420, 280 * len(param_order) + 80),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
@@ -353,7 +353,7 @@ def build_monthly_heatmap(matrix: pd.DataFrame, scope_label: str) -> go.Figure:
         figure,
         title=(
             f"{scope_label} | monthly issue grid"
-            "<br><sup>Cells show monthly mean anomalies against the same calendar month across the historical sample.</sup>"
+            "<br><sup>Cells show monthly mean anomalies against the same calendar month in prior years.</sup>"
         ),
         height=max(420, 32 * len(pivot_z.index) + 160),
         margin=dict(l=10, r=10, t=90, b=20),

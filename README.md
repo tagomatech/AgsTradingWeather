@@ -9,7 +9,7 @@ First pass of a crop weather monitor focused on palm oil in Indonesia and Malays
 - Country issue map for Indonesia and Malaysia.
 - History/current/forecast chart with seasonal reference bands.
 - Monthly issue heatmap and ranked issue table for the desk.
-- Local CSV feed support with deterministic sample fallback.
+- Local CSV feed support.
 
 ## Param label breakdown
 
@@ -36,5 +36,4 @@ The app runs at `http://127.0.0.1:8052` as `agstradingapp`.
 
 ## Data
 
-If `data/palm_oil_weather_feed.csv` exists, the app uses it.
-Otherwise it falls back to built-in sample data.
+Place `palm_oil_weather_feed.csv` in `data/` or beside `app.py`.

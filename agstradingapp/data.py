@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import CountryDefinition, CropDefinition, PALM_OIL
+from .config import CropDefinition, PALM_OIL
 from .domain import build_param_dictionary
 
 
@@ -26,30 +26,24 @@ class CropDataset:
 
 def load_dataset(crop: CropDefinition = PALM_OIL) -> CropDataset:
     csv_path = crop_csv_path(crop)
+    if csv_path is None:
+        raise missing_feed_error(crop)
     file_signature = csv_file_signature(csv_path)
-    return _load_dataset_cached(crop, str(csv_path) if csv_path else "", file_signature)
+    return _load_dataset_cached(crop, str(csv_path), file_signature)
 
 
 @lru_cache(maxsize=8)
 def _load_dataset_cached(
     crop: CropDefinition,
     csv_path_text: str,
-    file_signature: tuple[int, int] | tuple[()],
+    file_signature: tuple[int, int],
 ) -> CropDataset:
     del file_signature
 
-    csv_path = Path(csv_path_text) if csv_path_text else None
-    if csv_path is not None:
-        raw = load_csv_weather(csv_path)
-        source_mode = "csv"
-        status_message = f"Loaded local CSV feed from {describe_csv_path(csv_path)}."
-    else:
-        raw = generate_sample_weather(crop)
-        source_mode = "sample"
-        status_message = (
-            f"Live CSV not found. Expected {crop.data_filename} in data/ or beside app.py; "
-            "using deterministic sample feed."
-        )
+    csv_path = Path(csv_path_text)
+    raw = load_csv_weather(csv_path)
+    source_mode = "csv"
+    status_message = f"Loaded CSV feed from {describe_csv_path(csv_path)}."
 
     prepared = prepare_weather_frame(raw)
     current_date = prepared["date_release"].max().normalize()
@@ -114,6 +108,14 @@ def describe_csv_path(csv_path: Path) -> str:
         return str(csv_path.relative_to(repo_root()))
     except ValueError:
         return str(csv_path)
+
+
+def missing_feed_error(crop: CropDefinition) -> FileNotFoundError:
+    candidate_lines = "\n".join(f"- {path}" for path in crop_csv_candidates(crop))
+    return FileNotFoundError(
+        "Palm oil CSV feed not found. Expected one of:\n"
+        f"{candidate_lines}"
+    )
 
 
 def load_csv_weather(csv_path: Path) -> pd.DataFrame:
@@ -293,148 +295,3 @@ def reduce_to_country_level(
     return pd.DataFrame.from_records(records).sort_values(
         ["date", "geo", "param"]
     ).reset_index(drop=True)
-
-
-def generate_sample_weather(crop: CropDefinition) -> pd.DataFrame:
-    as_of = pd.Timestamp(
-        os.getenv(
-            "WEATHER_SAMPLE_AS_OF",
-            pd.Timestamp.today().normalize().date().isoformat(),
-        )
-    )
-    start_date = pd.Timestamp(os.getenv("WEATHER_SAMPLE_START", "2018-01-01"))
-    forecast_horizon = 15
-    dates = pd.date_range(start_date, as_of + pd.Timedelta(days=forecast_horizon), freq="D")
-    day_of_year = dates.dayofyear.to_numpy()
-    years_since_start = (dates.year - start_date.year).to_numpy()
-
-    country_arrays: dict[tuple[str, str], dict[str, np.ndarray]] = {}
-    records: list[dict[str, object]] = []
-
-    for country_index, country in enumerate(crop.countries):
-        region_arrays: dict[str, dict[str, np.ndarray]] = {}
-        for region_index, region in enumerate(country.regions):
-            phase_shift = 18 if country.code == "mys" else 0
-            seasonal_cycle = 0.55 * np.sin((2 * np.pi * (day_of_year + phase_shift)) / 365.25)
-            sub_seasonal_cycle = 0.25 * np.cos((4 * np.pi * (day_of_year + phase_shift)) / 365.25)
-            climate_trend = years_since_start * 0.018
-            recent_heat_pulse = np.where(
-                (dates >= as_of - pd.Timedelta(days=10)) & (dates <= as_of + pd.Timedelta(days=5)),
-                0.85 if country.code == "idn" else 0.45,
-                0.0,
-            )
-            forecast_cooling = np.where(
-                dates > as_of,
-                np.linspace(0.2, -0.25, len(dates)),
-                0.0,
-            )
-
-            regional_wave = 0.18 * np.sin(
-                (2 * np.pi * (day_of_year + (region_index + 1) * 11 + country_index * 7)) / 365.25
-            )
-            regional_offset = ((region_index % 5) - 2) * 0.12
-            deterministic_noise = 0.08 * np.cos(
-                (2 * np.pi * (day_of_year + (region_index + 3) * 17)) / 31.0
-            )
-
-            mean_temp = (
-                (27.15 if country.code == "idn" else 26.65)
-                + seasonal_cycle
-                + sub_seasonal_cycle
-                + climate_trend
-                + recent_heat_pulse
-                + forecast_cooling
-                + regional_wave
-                + regional_offset
-                + deterministic_noise
-            )
-            max_temp = mean_temp + 4.2 + 0.18 * np.sin((2 * np.pi * day_of_year) / 29.0)
-            min_temp = mean_temp - 4.0 + 0.16 * np.cos((2 * np.pi * day_of_year) / 23.0)
-
-            region_arrays[region.geo] = {
-                "palmoil-t2m_mean-degree_c": mean_temp,
-                "palmoil-t2m_max-degree_c": max_temp,
-                "palmoil-t2m_min-degree_c": min_temp,
-            }
-
-            for param, values in region_arrays[region.geo].items():
-                for date_value, value in zip(dates, values, strict=True):
-                    if date_value <= as_of:
-                        records.append(
-                            {
-                                "date": date_value,
-                                "date_release": date_value,
-                                "year_market": date_value.year,
-                                "param": param,
-                                "geo": region.geo,
-                                "value": float(value),
-                            }
-                        )
-                    else:
-                        records.append(
-                            {
-                                "date": date_value,
-                                "date_release": as_of - pd.Timedelta(days=1),
-                                "year_market": date_value.year,
-                                "param": param,
-                                "geo": region.geo,
-                                "value": float(value - 0.12),
-                            }
-                        )
-                        records.append(
-                            {
-                                "date": date_value,
-                                "date_release": as_of,
-                                "year_market": date_value.year,
-                                "param": param,
-                                "geo": region.geo,
-                                "value": float(value),
-                            }
-                        )
-
-        weights = np.array([region.weight for region in country.regions], dtype=float)
-        for param in crop.params:
-            stacked = np.vstack([region_arrays[region.geo][param] for region in country.regions])
-            country_arrays[(country.code, param)] = {
-                "current": np.average(stacked, axis=0, weights=weights),
-                "previous": np.average(stacked - 0.12, axis=0, weights=weights),
-            }
-
-    for country in crop.countries:
-        for param in crop.params:
-            payload = country_arrays[(country.code, param)]
-            for idx, date_value in enumerate(dates):
-                if date_value <= as_of:
-                    records.append(
-                        {
-                            "date": date_value,
-                            "date_release": date_value,
-                            "year_market": date_value.year,
-                            "param": param,
-                            "geo": country.code,
-                            "value": float(payload["current"][idx]),
-                        }
-                    )
-                else:
-                    records.append(
-                        {
-                            "date": date_value,
-                            "date_release": as_of - pd.Timedelta(days=1),
-                            "year_market": date_value.year,
-                            "param": param,
-                            "geo": country.code,
-                            "value": float(payload["previous"][idx]),
-                        }
-                    )
-                    records.append(
-                        {
-                            "date": date_value,
-                            "date_release": as_of,
-                            "year_market": date_value.year,
-                            "param": param,
-                            "geo": country.code,
-                            "value": float(payload["current"][idx]),
-                        }
-                    )
-
-    return pd.DataFrame.from_records(records)

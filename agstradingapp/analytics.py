@@ -27,6 +27,18 @@ def filter_snapshot(snapshot: pd.DataFrame, scope: str, crop: CropDefinition) ->
     return snapshot[snapshot["geo"] == scope].copy()
 
 
+def describe_scope(scope: str, crop: CropDefinition) -> str:
+    if scope == "all":
+        return f"{crop.label} core belt"
+    if is_country_scope(scope, crop):
+        return crop.country_lookup[scope].label
+    region = crop.region_lookup.get(scope)
+    if region is None:
+        return scope
+    country = crop.region_country_lookup[scope]
+    return f"{country.label} / {region.label}"
+
+
 def build_snapshot(geo_daily: pd.DataFrame, current_date: pd.Timestamp) -> pd.DataFrame:
     actual = geo_daily[geo_daily["date"] <= current_date].copy()
     if actual.empty:
@@ -121,47 +133,36 @@ def build_kpi_summary(
     crop: CropDefinition,
     scope: str,
     current_date: pd.Timestamp,
+    focus_param: str | None = None,
 ) -> list[dict[str, str]]:
     scoped = filter_snapshot(snapshot, scope, crop)
+    if focus_param:
+        scoped = scoped[scoped["param"] == focus_param].copy()
     if scoped.empty:
         return []
 
     warm_count = int(scoped["zscore"].ge(1.0).sum())
     cool_count = int(scoped["zscore"].le(-1.0).sum())
     top_signal = scoped.sort_values("abs_zscore", ascending=False).iloc[0]
+    metric_label = top_signal["metric_label"]
+    scope_label = describe_scope(scope, crop)
 
-    if scope == "all":
-        coverage = f"{len(crop.countries)} country cuts / {scoped['param'].nunique()} metrics"
-        coverage_detail = "Core belt overview"
-    elif is_country_scope(scope, crop):
-        coverage = f"{scoped['geo'].nunique()} geos / {scoped['param'].nunique()} metrics"
-        coverage_detail = crop.country_lookup[scope].label
-    else:
-        coverage = f"{scoped['geo'].nunique()} geo / {scoped['param'].nunique()} metrics"
-        coverage_detail = top_signal["country_label"]
-
-    top_signal_text = (
-        f"{top_signal['geo_label']} {top_signal['metric_label']} "
-        f"{top_signal['anomaly']:+.2f} {top_signal['unit_label']}"
-    )
+    top_signal_text = f"{top_signal['geo_label']} {top_signal['anomaly']:+.2f} {top_signal['unit_label']}"
 
     return [
-        {"label": "Coverage", "value": coverage, "detail": coverage_detail},
+        {"label": "Desk Focus", "value": scope_label, "detail": f"{scoped['geo'].nunique()} geo cuts"},
+        {"label": "Metric", "value": metric_label, "detail": "selected weather lens"},
         {
             "label": "Current Cut",
             "value": current_date.strftime("%d %b %Y"),
             "detail": "latest release date",
         },
         {
-            "label": "Warm / Cool Signals",
+            "label": "Warm / Cool",
             "value": f"{warm_count} / {cool_count}",
             "detail": "z-score beyond +/-1.0",
         },
-        {
-            "label": "Largest Deviation",
-            "value": top_signal["issue_flag"],
-            "detail": top_signal_text,
-        },
+        {"label": "Top Signal", "value": top_signal["issue_flag"], "detail": top_signal_text},
     ]
 
 

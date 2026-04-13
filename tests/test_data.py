@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from agstradingapp.config import PALM_OIL
 from agstradingapp.data import load_dataset
@@ -43,6 +44,14 @@ def test_load_dataset_prefers_local_csv(monkeypatch, tmp_path):
     assert not dataset.geo_daily.empty
     assert not dataset.country_daily.empty
     assert dataset.current_date == pd.Timestamp("2026-04-12")
+
+
+def test_load_dataset_raises_when_csv_is_missing(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AGSTRADINGAPP_DATA_FILE", raising=False)
+
+    with pytest.raises(FileNotFoundError, match="Palm oil CSV feed not found"):
+        load_dataset(PALM_OIL)
 
 
 def test_load_dataset_finds_csv_in_current_working_directory(monkeypatch, tmp_path):
