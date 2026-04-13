@@ -1,0 +1,11 @@
+__pycache__/
+.pytest_cache/
+.venv/
+.venv*/
+.vs/
+.vscode/
+*.pyc
+*.pyo
+*.pyd
+*.user
+*.suo

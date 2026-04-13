@@ -1,0 +1,49 @@
+import pandas as pd
+
+from agstradingapp.config import PALM_OIL
+from agstradingapp.data import prepare_weather_frame, reduce_to_country_level
+from agstradingapp.domain import parse_param_label
+
+
+def test_parse_param_label_extracts_expected_tokens():
+    descriptor = parse_param_label("palmoil-t2m_max-degree_c")
+
+    assert descriptor.crop_key == "palmoil"
+    assert descriptor.variable_code == "t2m"
+    assert descriptor.statistic_code == "max"
+    assert descriptor.unit_code == "degree_c"
+    assert descriptor.short_label == "Maximum Temperature"
+
+
+def test_reduce_to_country_level_prefers_exact_country_geo():
+    raw = pd.DataFrame(
+        [
+            {
+                "date": "2026-04-13",
+                "date_release": "2026-04-13",
+                "year_market": 2026,
+                "param": "palmoil-t2m_mean-degree_c",
+                "geo": "idn",
+                "value": 28.4,
+            },
+            {
+                "date": "2026-04-13",
+                "date_release": "2026-04-13",
+                "year_market": 2026,
+                "param": "palmoil-t2m_mean-degree_c",
+                "geo": "idn_sumatra",
+                "value": 27.1,
+            },
+        ]
+    )
+
+    prepared = prepare_weather_frame(raw)
+    reduced = reduce_to_country_level(
+        prepared=prepared,
+        crop=PALM_OIL,
+        current_date=pd.Timestamp("2026-04-13"),
+    )
+
+    assert len(reduced) == 1
+    assert reduced.iloc[0]["country_code"] == "idn"
+    assert reduced.iloc[0]["value"] == 28.4
