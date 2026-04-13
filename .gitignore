@@ -4,6 +4,8 @@ __pycache__/
 .venv*/
 .vs/
 .vscode/
+data/*.csv
+!data/.gitkeep
 *.pyc
 *.pyo
 *.pyd

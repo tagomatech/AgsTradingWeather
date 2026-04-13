@@ -99,6 +99,11 @@ body {
   color: #ffd5bf;
 }
 
+.meta-pill--csv {
+  background: rgba(94, 191, 145, 0.18);
+  color: #dff7e8;
+}
+
 .meta-pill--database {
   background: rgba(94, 191, 145, 0.18);
   color: #dff7e8;

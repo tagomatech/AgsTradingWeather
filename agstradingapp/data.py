@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -22,23 +23,18 @@ class CropDataset:
 
 
 def load_dataset(crop: CropDefinition = PALM_OIL) -> CropDataset:
-    db_url = os.getenv("WEATHER_DB_URL")
-    status_message = "Using deterministic sample data. Set WEATHER_DB_URL to query source.wth."
-    source_mode = "sample"
-
-    if db_url:
-        try:
-            raw = fetch_live_weather(crop=crop, db_url=db_url)
-            source_mode = "database"
-            status_message = "Live query succeeded against source.wth."
-        except Exception as exc:  # pragma: no cover - exercised only with live DB issues
-            raw = generate_sample_weather(crop)
-            status_message = (
-                "Live query failed, so the app fell back to deterministic sample data. "
-                f"Reason: {exc}"
-            )
+    csv_path = crop_csv_path(crop)
+    if csv_path.exists():
+        raw = load_csv_weather(csv_path)
+        source_mode = "csv"
+        status_message = f"Loaded local CSV feed from data/{csv_path.name}."
     else:
         raw = generate_sample_weather(crop)
+        source_mode = "sample"
+        status_message = (
+            f"Using deterministic sample data. Drop {crop.data_filename} into data/ to use "
+            "the local feed."
+        )
 
     prepared = prepare_weather_frame(raw)
     current_date = prepared["date_release"].max().normalize()
@@ -56,39 +52,23 @@ def load_dataset(crop: CropDefinition = PALM_OIL) -> CropDataset:
     )
 
 
-def fetch_live_weather(crop: CropDefinition, db_url: str) -> pd.DataFrame:
-    from sqlalchemy import create_engine, text
+def repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
 
-    table_name = os.getenv("WEATHER_SQL_TABLE", "source.wth")
-    start_date = os.getenv("WEATHER_START_DATE", "2005-01-01")
 
-    param_clauses: list[str] = []
-    geo_clauses: list[str] = []
-    bind_params: dict[str, str] = {"start_date": start_date}
+def data_dir() -> Path:
+    path = repo_root() / "data"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
-    for idx, param in enumerate(crop.params):
-        key = f"param_{idx}"
-        bind_params[key] = param
-        param_clauses.append(f"param = :{key}")
 
-    for idx, country_code in enumerate(crop.country_codes):
-        key = f"geo_{idx}"
-        bind_params[key] = f"{country_code}%"
-        geo_clauses.append(f"geo LIKE :{key}")
+def crop_csv_path(crop: CropDefinition) -> Path:
+    override = os.getenv("AGSTRADINGAPP_DATA_FILE")
+    return Path(override) if override else data_dir() / crop.data_filename
 
-    query = f"""
-        SELECT date, date_release, year_market, param, geo, value
-        FROM {table_name}
-        WHERE ({' OR '.join(param_clauses)})
-          AND ({' OR '.join(geo_clauses)})
-          AND date >= :start_date
-          AND geo NOT LIKE '%-%'
-        ORDER BY date ASC, date_release ASC, param, geo
-    """
 
-    engine = create_engine(db_url)
-    with engine.connect() as connection:
-        return pd.read_sql(text(query), connection, params=bind_params)
+def load_csv_weather(csv_path: Path) -> pd.DataFrame:
+    return pd.read_csv(csv_path)
 
 
 def prepare_weather_frame(raw: pd.DataFrame) -> pd.DataFrame:

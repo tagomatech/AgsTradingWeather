@@ -18,6 +18,7 @@ class CropDefinition:
     countries: tuple[CountryDefinition, ...]
     params: tuple[str, ...]
     default_map_param: str
+    data_filename: str
 
     @property
     def country_codes(self) -> tuple[str, ...]:
@@ -45,4 +46,5 @@ PALM_OIL = CropDefinition(
         "palmoil-t2m_min-degree_c",
     ),
     default_map_param="palmoil-t2m_mean-degree_c",
+    data_filename="palm_oil_weather_feed.csv",
 )
