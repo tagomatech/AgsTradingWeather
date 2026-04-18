@@ -4,22 +4,29 @@ import os
 import socket
 import threading
 import time
+from functools import lru_cache
+from pathlib import Path
 
 import pandas as pd
 from dash import Dash, Input, Output, State, dash_table, dcc, html
 
 from agstradingapp.analytics import (
-    build_kpi_summary,
-    build_monthly_issue_matrix,
     build_recent_context,
     build_snapshot,
+    describe_comparison_mode,
     filter_snapshot,
 )
 from agstradingapp.config import PALM_OIL
 from agstradingapp.data import load_dataset
+from agstradingapp.domain import (
+    describe_latest_measure,
+    describe_window_column_label,
+    describe_window_measure,
+    parse_param_label,
+)
 from agstradingapp.figures import (
-    build_geo_overview_figure,
-    build_monthly_heatmap,
+    build_geo_map_figure,
+    build_geo_ranking_figure,
     build_recent_context_figure,
 )
 
@@ -29,18 +36,41 @@ def load_app_state():
         dataset = load_dataset(PALM_OIL)
     except FileNotFoundError as exc:
         return None, pd.DataFrame(), str(exc)
-    return dataset, build_snapshot(dataset.geo_daily, dataset.current_date), None
+    return dataset, dataset.snapshot, None
 
 
 DATASET, SNAPSHOT, FEED_ERROR = load_app_state()
 
+DEFAULT_COUNTRY = PALM_OIL.countries[0].code
+DEFAULT_SCOPE = DEFAULT_COUNTRY
+DEFAULT_METRIC = PALM_OIL.default_map_param
+DEFAULT_GEO_VIEW = "signal_zscore"
+DEFAULT_WINDOW = 7
+DEFAULT_COMPARE = "same_period_last_year"
+
+COUNTRY_OPTIONS = [{"label": country.label, "value": country.code} for country in PALM_OIL.countries]
 METRIC_OPTIONS = (
     [{"label": row["short_label"], "value": row["raw_param"]} for _, row in DATASET.param_dictionary.iterrows()]
     if DATASET is not None
     else []
 )
-COUNTRY_OPTIONS = [{"label": "Core belt", "value": "all"}] + [
-    {"label": country.label, "value": country.code} for country in PALM_OIL.countries
+WINDOW_OPTIONS = [
+    {"label": "7d", "value": 7},
+    {"label": "14d", "value": 14},
+    {"label": "30d", "value": 30},
+    {"label": "60d", "value": 60},
+    {"label": "90d", "value": 90},
+]
+COMPARE_OPTIONS = [
+    {"label": "Previous window", "value": "previous_window"},
+    {"label": "Same dates last year", "value": "same_period_last_year"},
+    {"label": "Historical normal", "value": "seasonal_normal"},
+]
+GEO_VIEW_OPTIONS = [
+    {"label": "Signal score", "value": "signal_zscore"},
+    {"label": "Anomaly", "value": "anomaly"},
+    {"label": "% of normal", "value": "pct_normal"},
+    {"label": "Current level", "value": "actual_level"},
 ]
 
 PARAM_GLOSSARY_COLUMNS = [
@@ -51,20 +81,10 @@ PARAM_GLOSSARY_COLUMNS = [
     {"name": "Unit", "id": "unit_label"},
 ]
 
-ISSUE_COLUMNS = [
-    {"name": "Signal", "id": "signal"},
-    {"name": "Geo", "id": "geo"},
-    {"name": "Metric", "id": "metric"},
-    {"name": "Latest", "id": "latest"},
-    {"name": "Anomaly", "id": "anomaly"},
-    {"name": "z-score", "id": "zscore"},
-    {"name": "Weight", "id": "weight"},
-]
-
-TABLE_HEADER_STYLE = {"fontWeight": "600", "backgroundColor": "#f4ede2"}
+TABLE_HEADER_STYLE = {"fontWeight": "700", "backgroundColor": "#edf1ef", "border": "none"}
 TABLE_CELL_STYLE = {
-    "backgroundColor": "rgba(255,255,255,0.88)",
-    "color": "#1f2d25",
+    "backgroundColor": "rgba(255,255,255,0.9)",
+    "color": "#243740",
     "border": "none",
     "fontFamily": "IBM Plex Sans, Segoe UI, sans-serif",
     "padding": "10px 12px",
@@ -75,41 +95,111 @@ TABLE_CELL_STYLE = {
 }
 
 app = Dash(__name__, suppress_callback_exceptions=True)
-app.title = "Palm Oil Weather Desk"
+app.title = "AGSTRADINGWEATHERAPP | Palm Oil Desk"
 
 DASH_HOST = os.getenv("AGSTRADINGAPP_HOST", "127.0.0.1")
-DASH_PORT = int(os.getenv("AGSTRADINGAPP_PORT", "8052"))
+APP_REVISION = str(Path(__file__).stat().st_mtime_ns)
+
+
+def resolve_dash_port() -> int:
+    explicit_port = os.getenv("AGSTRADINGAPP_PORT")
+    if explicit_port:
+        return int(explicit_port)
+
+    # Under Streamlit, avoid reusing an old embedded Dash process after code changes.
+    if "STREAMLIT_SERVER_PORT" in os.environ:
+        return 8200 + (int(APP_REVISION[-4:]) % 400)
+
+    return 8052
+
+
+DASH_PORT = resolve_dash_port()
 
 
 def build_scope_options(country_focus: str) -> list[dict[str, str]]:
-    if country_focus == "all":
-        return [{"label": "Core belt overview", "value": "all"}]
-
     country = PALM_OIL.country_lookup[country_focus]
-    options = [{"label": f"{country.label} aggregate", "value": country.code}]
+    options = [{"label": f"{country.label} total", "value": country.code}]
     options.extend({"label": region.label, "value": region.geo} for region in country.regions)
     return options
 
 
-def render_kpi_cards(summary_cards: list[dict[str, str]]) -> list[html.Div]:
+def format_value(value: float | None, unit_label: str | None = None, signed: bool = False) -> str:
+    if value is None or pd.isna(value):
+        return "--"
+    number = f"{value:+.2f}" if signed else f"{value:.2f}"
+    return f"{number} {unit_label}" if unit_label else number
+
+
+def build_issue_table_columns(metric: str, window_days: int) -> list[dict[str, str]]:
     return [
-        html.Div(
-            className="kpi-card",
-            children=[
-                html.Div(card["label"], className="kpi-label"),
-                html.Div(card["value"], className="kpi-value"),
-                html.Div(card["detail"], className="kpi-detail"),
-            ],
-        )
-        for card in summary_cards
+        {"name": "Signal", "id": "signal"},
+        {"name": "Geo", "id": "geo"},
+        {"name": describe_window_column_label(metric, window_days).title(), "id": "window_value"},
+        {"name": "Latest day", "id": "latest_day"},
+        {"name": "Reference", "id": "reference"},
+        {"name": "Anomaly", "id": "anomaly"},
+        {"name": "z-score", "id": "zscore"},
+        {"name": "Weight", "id": "weight"},
     ]
 
 
+def build_reading_guide(metric: str, window_days: int, comparison_mode: str) -> list[object]:
+    descriptor = parse_param_label(metric)
+    window_measure = describe_window_measure(descriptor, window_days)
+    latest_measure = describe_latest_measure(descriptor)
+    comparison_label = describe_comparison_mode(comparison_mode, window_days)
+
+    chart_line_text = (
+        f'The "Reference" line in the recent-path chart shows the {comparison_label} benchmark for each day.'
+    )
+    if comparison_mode == "same_period_last_year":
+        chart_line_text += " The grey band still shows the broader historical range when enough history exists."
+    elif comparison_mode == "seasonal_normal":
+        chart_line_text += " It is computed from all available prior years that match the same calendar dates."
+    else:
+        chart_line_text += " It is a rolling average of the prior window, so it stays on the same daily scale as the chart."
+
+    return [
+        html.Div("How To Read This View", className="panel-title"),
+        html.P(
+            f'Anomaly and z-score use the selected {window_measure}. '
+            f'For {descriptor.short_label}, that is the number used to color the map, rank regions, and sort the issue table.',
+            className="panel-copy panel-copy--tight",
+        ),
+        html.Ul(
+            className="guide-list",
+            children=[
+                html.Li(
+                    f'"Latest day" is the {latest_measure}. For accumulated precipitation, that means rainfall on the release date, not the full {window_days}-day total.'
+                ),
+                html.Li(
+                    f'"Reference" in the table is the benchmark behind the anomaly and z-score for that same {window_measure}.'
+                ),
+                html.Li(chart_line_text),
+                html.Li(
+                    "Historical normal uses whatever prior history is available in the feed for those calendar dates. If the feed starts recently, the normal is based on fewer years or stays blank when no history exists."
+                ),
+            ],
+        ),
+    ]
+
+
+def build_issue_summary(metric: str, window_days: int, comparison_mode: str) -> str:
+    window_measure = describe_window_measure(metric, window_days)
+    comparison_label = describe_comparison_mode(comparison_mode, window_days)
+    return (
+        f"Rows are sorted by absolute z-score. "
+        f'"Latest day" is the newest daily print, while anomaly and z-score compare the selected {window_measure} versus {comparison_label}.'
+    )
+
+
 def build_issue_table_rows(
+    snapshot: pd.DataFrame,
     scope: str,
     focus_param: str | None = None,
+    window_days: int = 7,
 ) -> tuple[list[dict[str, str]], list[dict[str, dict[str, str]]]]:
-    scoped = filter_snapshot(SNAPSHOT, scope, PALM_OIL).sort_values(
+    scoped = filter_snapshot(snapshot, scope, PALM_OIL).sort_values(
         ["level_order", "abs_zscore", "geo_weight"],
         ascending=[True, False, False],
     )
@@ -119,17 +209,19 @@ def build_issue_table_rows(
     rows: list[dict[str, str]] = []
     tooltips: list[dict[str, dict[str, str]]] = []
     for _, row in scoped.iterrows():
+        descriptor = parse_param_label(row["param"])
+        window_measure = describe_window_measure(descriptor, window_days)
+        latest_measure = describe_latest_measure(descriptor)
         rows.append(
             {
                 "signal": row["issue_flag"],
                 "geo": row["geo_label"],
-                "metric": row["metric_label"],
-                "latest": f"{row['latest_value']:.2f} {row['unit_label']}",
-                "anomaly": f"{row['anomaly']:+.2f} {row['unit_label']}",
-                "zscore": f"{row['zscore']:+.2f}",
-                "weight": (
-                    "--" if row["geo_level"] == "country" else f"{row['geo_weight']:.2f}%"
-                ),
+                "window_value": format_value(row["window_mean"], row["unit_label"]),
+                "latest_day": format_value(row["latest_value"], row["unit_label"]),
+                "reference": format_value(row["reference_mean"], row["unit_label"]),
+                "anomaly": format_value(row["anomaly"], row["unit_label"], signed=True),
+                "zscore": format_value(row["zscore"], signed=True),
+                "weight": "--" if row["geo_level"] == "country" else f"{row['geo_weight']:.2f}%",
             }
         )
         tooltips.append(
@@ -141,16 +233,125 @@ def build_issue_table_rows(
                     ),
                     "type": "text",
                 },
-                "latest": {
+                "window_value": {
                     "value": (
-                        f"7d mean: {row['trailing_7d_mean']:.2f} {row['unit_label']}\n"
-                        f"Seasonal mean: {row['climatology_mean']:.2f} {row['unit_label']}"
+                        f"{window_measure.title()}: {format_value(row['window_mean'], row['unit_label'])}\n"
+                        f"Built from the selected {window_days}-day window."
+                    ),
+                    "type": "text",
+                },
+                "latest_day": {
+                    "value": (
+                        f"{latest_measure.title()}: {format_value(row['latest_value'], row['unit_label'])}\n"
+                        "This is the last daily reading in the current cut."
+                    ),
+                    "type": "text",
+                },
+                "reference": {
+                    "value": (
+                        f"{row['reference_label'].title()}: {format_value(row['reference_mean'], row['unit_label'])}\n"
+                        f"Historical seasons available: {row['history_years']}"
                     ),
                     "type": "text",
                 },
             }
         )
     return rows, tooltips
+
+
+@lru_cache(maxsize=160)
+def compute_snapshot(window_days: int, comparison_mode: str) -> pd.DataFrame:
+    if DATASET is None:
+        return pd.DataFrame()
+    if int(window_days) == DEFAULT_WINDOW and comparison_mode == DEFAULT_COMPARE:
+        return SNAPSHOT
+    return build_snapshot(
+        DATASET.geo_daily,
+        DATASET.current_date,
+        window_days=int(window_days),
+        comparison_mode=comparison_mode,
+    )
+
+
+@lru_cache(maxsize=256)
+def compute_dashboard_view(
+    country_focus: str,
+    scope: str,
+    metric: str,
+    geo_view_mode: str,
+    window_days: int,
+    comparison_mode: str,
+):
+    if DATASET is None:
+        return [], "", [], {}, {}, {}, [], []
+
+    snapshot = compute_snapshot(int(window_days), comparison_mode)
+    comparison_label = describe_comparison_mode(comparison_mode, int(window_days))
+
+    recent_context, scope_label = build_recent_context(
+        country_daily=DATASET.country_daily,
+        geo_daily=DATASET.geo_daily,
+        crop=PALM_OIL,
+        scope=scope,
+        current_date=DATASET.current_date,
+        core_belt_daily=DATASET.core_belt_daily,
+        focus_param=metric,
+        window_days=int(window_days),
+        comparison_mode=comparison_mode,
+    )
+    issue_rows, issue_tooltips = build_issue_table_rows(
+        snapshot=snapshot,
+        scope=scope,
+        focus_param=metric,
+        window_days=int(window_days),
+    )
+
+    return (
+        build_reading_guide(metric, int(window_days), comparison_mode),
+        build_issue_summary(metric, int(window_days), comparison_mode),
+        build_issue_table_columns(metric, int(window_days)),
+        build_geo_map_figure(
+            snapshot,
+            metric,
+            scope,
+            PALM_OIL,
+            display_mode=geo_view_mode,
+            window_days=int(window_days),
+            comparison_label=comparison_label,
+        ),
+        build_geo_ranking_figure(
+            snapshot,
+            metric,
+            scope,
+            PALM_OIL,
+            display_mode=geo_view_mode,
+            window_days=int(window_days),
+            comparison_label=comparison_label,
+        ),
+        build_recent_context_figure(
+            recent_context,
+            DATASET.current_date,
+            scope_label,
+            comparison_label=comparison_label,
+            comparison_mode=comparison_mode,
+        ),
+        issue_rows,
+        issue_tooltips,
+    )
+
+
+DEFAULT_VIEW = (
+    compute_dashboard_view(
+        DEFAULT_COUNTRY,
+        DEFAULT_SCOPE,
+        DEFAULT_METRIC,
+        DEFAULT_GEO_VIEW,
+        DEFAULT_WINDOW,
+        DEFAULT_COMPARE,
+    )
+    if DATASET is not None
+    else None
+)
 
 
 def is_running_under_streamlit() -> bool:
@@ -169,12 +370,7 @@ def is_dash_server_reachable(host: str = DASH_HOST, port: int = DASH_PORT) -> bo
 
 
 def run_dash_server(debug: bool) -> None:
-    app.run(
-        debug=debug,
-        host=DASH_HOST,
-        port=DASH_PORT,
-        use_reloader=False,
-    )
+    app.run(debug=debug, host=DASH_HOST, port=DASH_PORT, use_reloader=False)
 
 
 def wait_for_dash_server(host: str = DASH_HOST, port: int = DASH_PORT, timeout: float = 8.0) -> bool:
@@ -190,21 +386,21 @@ def render_streamlit_shell() -> None:
     import streamlit as st
     import streamlit.components.v1 as components
 
-    st.set_page_config(page_title="Palm Oil Weather Desk", layout="wide")
-    st.title("Palm Oil Weather Desk")
-    st.caption("Indonesia and Malaysia weather cuts and risk view")
+    st.set_page_config(page_title="AGSTRADINGWEATHERAPP", layout="wide")
+    st.title("AGSTRADINGWEATHERAPP")
+    st.caption("Palm oil weather desk for Indonesia and Malaysia")
 
     @st.cache_resource(show_spinner=False)
     def ensure_dash_server() -> bool:
         if is_dash_server_reachable():
             return True
 
-        debug = os.getenv("AGSTRADINGAPP_DEBUG", "1").lower() in {"1", "true", "yes", "on"}
+        debug = os.getenv("AGSTRADINGAPP_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
         thread = threading.Thread(
             target=run_dash_server,
             kwargs={"debug": debug},
             daemon=True,
-            name="agstradingapp-dash-server",
+            name="agstradingweatherapp-dash-server",
         )
         thread.start()
         return wait_for_dash_server()
@@ -212,7 +408,7 @@ def render_streamlit_shell() -> None:
     with st.spinner("Starting dashboard..."):
         ready = ensure_dash_server()
 
-    dash_url = f"http://{DASH_HOST}:{DASH_PORT}"
+    dash_url = f"http://{DASH_HOST}:{DASH_PORT}?v={APP_REVISION}"
     if ready:
         st.link_button("Open dashboard in new tab", dash_url)
         components.iframe(dash_url, height=2200, scrolling=True)
@@ -226,25 +422,22 @@ def build_missing_feed_layout(message: str) -> html.Div:
         className="page-shell",
         children=[
             html.Div(
-                className="hero-shell",
+                className="header-shell",
                 children=[
                     html.Div(
-                        className="hero-copy",
+                        className="header-copy",
                         children=[
-                            html.Div("AGSTRADINGAPP", className="eyebrow"),
+                            html.Div("AGSTRADINGWEATHERAPP", className="eyebrow"),
                             html.H1("Palm Oil Weather Desk", className="hero-title"),
                             html.P(
-                                "Indonesia and Malaysia weather cuts, regional anomalies, and forward risk.",
+                                "Indonesia and Malaysia weather signals and forecast context.",
                                 className="hero-subtitle",
                             ),
                         ],
                     ),
                     html.Div(
-                        className="hero-meta",
-                        children=[
-                            html.Div("CSV FEED", className="meta-pill meta-pill--csv"),
-                            html.Div("A local CSV is required before the dashboard can render.", className="meta-text"),
-                        ],
+                        className="status-chips",
+                        children=[html.Div("CSV feed required", className="status-chip status-chip--alert")],
                     ),
                 ],
             ),
@@ -252,10 +445,7 @@ def build_missing_feed_layout(message: str) -> html.Div:
                 className="panel missing-panel",
                 children=[
                     html.Div("Feed Required", className="panel-title"),
-                    html.P(
-                        "This app now runs only from the palm oil CSV feed.",
-                        className="panel-copy",
-                    ),
+                    html.P("This app runs only from the palm oil CSV feed.", className="panel-copy"),
                     html.Pre(message, className="error-block"),
                 ],
             ),
@@ -265,166 +455,204 @@ def build_missing_feed_layout(message: str) -> html.Div:
 
 def build_dashboard_layout() -> html.Div:
     assert DATASET is not None
+    assert DEFAULT_VIEW is not None
 
     return html.Div(
         className="page-shell",
         children=[
             html.Div(
-                className="hero-shell",
+                className="header-shell",
                 children=[
                     html.Div(
-                        className="hero-copy",
+                        className="header-copy",
                         children=[
-                            html.Div("AGSTRADINGAPP", className="eyebrow"),
+                            html.Div("AGSTRADINGWEATHERAPP", className="eyebrow"),
                             html.H1("Palm Oil Weather Desk", className="hero-title"),
                             html.P(
-                                "Indonesia and Malaysia weather cuts, regional anomalies, and forward risk.",
+                                "Compact risk view for Indonesian and Malaysian palm oil weather.",
                                 className="hero-subtitle",
                             ),
                         ],
                     ),
                     html.Div(
-                        className="hero-meta",
+                        className="status-chips",
                         children=[
-                            html.Div("CSV FEED", className="meta-pill meta-pill--csv"),
+                            html.Div("CSV feed", className="status-chip"),
                             html.Div(
-                                f"Latest release date: {DATASET.current_date.strftime('%d %b %Y')}",
-                                className="meta-text",
+                                f"Release {DATASET.current_date.strftime('%d %b %Y')}",
+                                className="status-chip status-chip--quiet",
                             ),
-                            html.Div(DATASET.status_message, className="meta-note"),
                         ],
                     ),
                 ],
             ),
             html.Div(
-                className="workspace-shell",
+                className="control-grid",
                 children=[
-                    html.Aside(
-                        className="sidebar",
+                    html.Div(
+                        className="control-card",
                         children=[
-                            html.Div(
-                                className="sidebar-card",
-                                children=[
-                                    html.Div("Desk Focus", className="control-label"),
-                                    dcc.RadioItems(
-                                        id="country-filter",
-                                        options=COUNTRY_OPTIONS,
-                                        value="all",
-                                        className="filter-radios",
-                                    ),
-                                ],
-                            ),
-                            html.Div(
-                                className="sidebar-card",
-                                children=[
-                                    html.Div("Region Cut", className="control-label"),
-                                    dcc.RadioItems(
-                                        id="scope-filter",
-                                        options=build_scope_options("all"),
-                                        value="all",
-                                        className="filter-radios filter-radios--dense",
-                                    ),
-                                ],
-                            ),
-                            html.Div(
-                                className="sidebar-card",
-                                children=[
-                                    html.Div("Metric", className="control-label"),
-                                    dcc.RadioItems(
-                                        id="metric-filter",
-                                        options=METRIC_OPTIONS,
-                                        value=PALM_OIL.default_map_param,
-                                        className="filter-radios",
-                                    ),
-                                ],
+                            html.Div("Country", className="toolbar-label"),
+                            dcc.Dropdown(
+                                id="country-filter",
+                                options=COUNTRY_OPTIONS,
+                                value=DEFAULT_COUNTRY,
+                                clearable=False,
+                                className="toolbar-dropdown control-dropdown",
                             ),
                         ],
                     ),
                     html.Div(
-                        className="workspace-main",
+                        className="control-card",
                         children=[
-                            html.Div(id="kpi-grid", className="kpi-grid"),
-                            html.Div(
-                                className="panel",
-                                children=[
-                                    dcc.Graph(
-                                        id="recent-context-chart",
-                                        config={"displayModeBar": False},
-                                    )
+                            html.Div("Area", className="toolbar-label"),
+                            dcc.Dropdown(
+                                id="scope-filter",
+                                options=build_scope_options(DEFAULT_COUNTRY),
+                                value=DEFAULT_SCOPE,
+                                clearable=False,
+                                className="toolbar-dropdown control-dropdown",
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        className="control-card",
+                        children=[
+                            html.Div("Metric", className="toolbar-label"),
+                            dcc.Dropdown(
+                                id="metric-filter",
+                                options=METRIC_OPTIONS,
+                                value=DEFAULT_METRIC,
+                                clearable=False,
+                                className="toolbar-dropdown control-dropdown",
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        className="control-card",
+                        children=[
+                            html.Div("Show As", className="toolbar-label"),
+                            dcc.Dropdown(
+                                id="geo-view-filter",
+                                options=GEO_VIEW_OPTIONS,
+                                value=DEFAULT_GEO_VIEW,
+                                clearable=False,
+                                className="toolbar-dropdown control-dropdown",
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        className="control-card",
+                        children=[
+                            html.Div("Signal Window", className="toolbar-label"),
+                            dcc.RadioItems(
+                                id="window-filter",
+                                options=WINDOW_OPTIONS,
+                                value=DEFAULT_WINDOW,
+                                className="toolbar-pills toolbar-pills--compact",
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        className="control-card control-card--wide",
+                        children=[
+                            html.Div("Compare To", className="toolbar-label"),
+                            dcc.RadioItems(
+                                id="comparison-filter",
+                                options=COMPARE_OPTIONS,
+                                value=DEFAULT_COMPARE,
+                                className="toolbar-pills",
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+            html.Div(
+                className="panel panel--guide",
+                children=[html.Div(id="reading-guide", children=DEFAULT_VIEW[0])],
+            ),
+            html.Div(
+                className="viz-grid",
+                children=[
+                    html.Div(
+                        className="panel",
+                        children=[
+                            dcc.Graph(
+                                id="geo-map",
+                                figure=DEFAULT_VIEW[3],
+                                config={"displayModeBar": False},
+                            )
+                        ],
+                    ),
+                    html.Div(
+                        className="panel",
+                        children=[
+                            dcc.Graph(
+                                id="geo-ranking",
+                                figure=DEFAULT_VIEW[4],
+                                config={"displayModeBar": False},
+                            )
+                        ],
+                    ),
+                ],
+            ),
+            html.Div(
+                className="dashboard-stack",
+                children=[
+                    html.Div(
+                        className="panel panel--recent-context",
+                        children=[
+                            dcc.Graph(
+                                id="recent-context-chart",
+                                figure=DEFAULT_VIEW[5],
+                                config={"displayModeBar": False},
+                            )
+                        ],
+                    ),
+                    html.Div(
+                        className="panel",
+                        children=[
+                            html.Div("Current Issue Table", className="panel-title"),
+                            html.P(DEFAULT_VIEW[1], className="panel-copy", id="issues-copy"),
+                            dash_table.DataTable(
+                                id="issues-table",
+                                columns=DEFAULT_VIEW[2],
+                                data=DEFAULT_VIEW[6],
+                                tooltip_data=DEFAULT_VIEW[7],
+                                sort_action="native",
+                                page_action="none",
+                                style_as_list_view=True,
+                                style_header=TABLE_HEADER_STYLE,
+                                style_cell=TABLE_CELL_STYLE,
+                                style_data_conditional=[
+                                    {
+                                        "if": {"filter_query": "{signal} contains 'stress'"},
+                                        "color": "#b44c3d",
+                                        "fontWeight": "700",
+                                    },
+                                    {
+                                        "if": {"filter_query": "{signal} contains 'watch'"},
+                                        "color": "#9b7a3c",
+                                    },
                                 ],
                             ),
-                            html.Div(
-                                className="overview-grid",
-                                children=[
-                                    html.Div(
-                                        className="panel",
-                                        children=[
-                                            dcc.Graph(
-                                                id="geo-overview",
-                                                config={"displayModeBar": False},
-                                            )
-                                        ],
-                                    ),
-                                    html.Div(
-                                        className="panel",
-                                        children=[
-                                            dcc.Graph(
-                                                id="monthly-heatmap",
-                                                config={"displayModeBar": False},
-                                            )
-                                        ],
-                                    ),
-                                ],
+                        ],
+                    ),
+                    html.Details(
+                        className="panel details-panel",
+                        children=[
+                            html.Summary("Param Field Guide", className="details-summary"),
+                            html.P(
+                                "Labels follow crop-variable_stat-unit, for example palmoil-t2m_max-degree_c.",
+                                className="panel-copy",
                             ),
-                            html.Div(
-                                className="panel",
-                                children=[
-                                    html.Div("Current Issue Table", className="panel-title"),
-                                    html.P(
-                                        "Sorted by absolute z-score for the selected metric and desk focus.",
-                                        className="panel-copy",
-                                    ),
-                                    dash_table.DataTable(
-                                        id="issues-table",
-                                        columns=ISSUE_COLUMNS,
-                                        data=[],
-                                        tooltip_data=[],
-                                        sort_action="native",
-                                        page_action="none",
-                                        style_as_list_view=True,
-                                        style_header=TABLE_HEADER_STYLE,
-                                        style_cell=TABLE_CELL_STYLE,
-                                        style_data_conditional=[
-                                            {
-                                                "if": {"filter_query": "{signal} contains 'stress'"},
-                                                "color": "#a2441d",
-                                                "fontWeight": "600",
-                                            },
-                                            {
-                                                "if": {"filter_query": "{signal} contains 'watch'"},
-                                                "color": "#8a5c13",
-                                            },
-                                        ],
-                                    ),
-                                ],
-                            ),
-                            html.Div(
-                                className="panel",
-                                children=[
-                                    html.Div("Param Field Guide", className="panel-title"),
-                                    html.P(
-                                        "Labels follow crop-variable_stat-unit, for example palmoil-t2m_max-degree_c.",
-                                        className="panel-copy",
-                                    ),
-                                    dash_table.DataTable(
-                                        columns=PARAM_GLOSSARY_COLUMNS,
-                                        data=DATASET.param_dictionary.to_dict("records"),
-                                        style_as_list_view=True,
-                                        page_action="none",
-                                        style_header=TABLE_HEADER_STYLE,
-                                        style_cell=TABLE_CELL_STYLE,
-                                    ),
-                                ],
+                            dash_table.DataTable(
+                                columns=PARAM_GLOSSARY_COLUMNS,
+                                data=DATASET.param_dictionary.to_dict("records"),
+                                style_as_list_view=True,
+                                page_action="none",
+                                style_header=TABLE_HEADER_STYLE,
+                                style_cell=TABLE_CELL_STYLE,
                             ),
                         ],
                     ),
@@ -453,48 +681,36 @@ if DATASET is not None:
 
 
     @app.callback(
-        Output("kpi-grid", "children"),
-        Output("geo-overview", "figure"),
+        Output("reading-guide", "children"),
+        Output("issues-copy", "children"),
+        Output("issues-table", "columns"),
+        Output("geo-map", "figure"),
+        Output("geo-ranking", "figure"),
         Output("recent-context-chart", "figure"),
-        Output("monthly-heatmap", "figure"),
         Output("issues-table", "data"),
         Output("issues-table", "tooltip_data"),
+        Input("country-filter", "value"),
         Input("scope-filter", "value"),
         Input("metric-filter", "value"),
+        Input("geo-view-filter", "value"),
+        Input("window-filter", "value"),
+        Input("comparison-filter", "value"),
     )
-    def refresh_dashboard(scope: str, metric: str):
-        summary_cards = build_kpi_summary(
-            snapshot=SNAPSHOT,
-            crop=PALM_OIL,
-            scope=scope,
-            current_date=DATASET.current_date,
-            focus_param=metric,
-        )
-        recent_context, scope_label = build_recent_context(
-            country_daily=DATASET.country_daily,
-            geo_daily=DATASET.geo_daily,
-            crop=PALM_OIL,
-            scope=scope,
-            current_date=DATASET.current_date,
-            focus_param=metric,
-        )
-        monthly_matrix = build_monthly_issue_matrix(
-            country_daily=DATASET.country_daily,
-            geo_daily=DATASET.geo_daily,
-            crop=PALM_OIL,
-            scope=scope,
-            current_date=DATASET.current_date,
-            focus_param=metric,
-        )
-        issue_rows, issue_tooltips = build_issue_table_rows(scope, metric)
-
-        return (
-            render_kpi_cards(summary_cards),
-            build_geo_overview_figure(SNAPSHOT, metric, scope, PALM_OIL),
-            build_recent_context_figure(recent_context, DATASET.current_date, scope_label),
-            build_monthly_heatmap(monthly_matrix, scope_label),
-            issue_rows,
-            issue_tooltips,
+    def refresh_dashboard(
+        country_focus: str,
+        scope: str,
+        metric: str,
+        geo_view_mode: str,
+        window_days: int,
+        comparison_mode: str,
+    ):
+        return compute_dashboard_view(
+            country_focus,
+            scope,
+            metric,
+            geo_view_mode,
+            int(window_days),
+            comparison_mode,
         )
 
 
@@ -502,11 +718,6 @@ if __name__ == "__main__":
     if is_running_under_streamlit():
         render_streamlit_shell()
     else:
-        debug = os.getenv("AGSTRADINGAPP_DEBUG", "1").lower() in {"1", "true", "yes", "on"}
+        debug = os.getenv("AGSTRADINGAPP_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
         use_reloader = debug and threading.current_thread() is threading.main_thread()
-        app.run(
-            debug=debug,
-            host=DASH_HOST,
-            port=DASH_PORT,
-            use_reloader=use_reloader,
-        )
+        app.run(debug=debug, host=DASH_HOST, port=DASH_PORT, use_reloader=use_reloader)

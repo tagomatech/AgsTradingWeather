@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pickle
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -8,8 +9,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .analytics import build_snapshot
 from .config import CropDefinition, PALM_OIL
 from .domain import build_param_dictionary
+
+CACHE_VERSION = "v3"
 
 
 @dataclass(frozen=True)
@@ -18,7 +22,9 @@ class CropDataset:
     raw: pd.DataFrame
     geo_daily: pd.DataFrame
     country_daily: pd.DataFrame
+    core_belt_daily: pd.DataFrame
     param_dictionary: pd.DataFrame
+    snapshot: pd.DataFrame
     current_date: pd.Timestamp
     source_mode: str
     status_message: str
@@ -38,25 +44,47 @@ def _load_dataset_cached(
     csv_path_text: str,
     file_signature: tuple[int, int],
 ) -> CropDataset:
-    del file_signature
-
     csv_path = Path(csv_path_text)
-    raw = load_csv_weather(csv_path)
     source_mode = "csv"
     status_message = f"Loaded CSV feed from {describe_csv_path(csv_path)}."
+    cached_payload = read_prepared_cache(crop, file_signature)
 
-    prepared = prepare_weather_frame(raw)
-    current_date = prepared["date_release"].max().normalize()
-    geo_daily = enrich_geo_daily(prepared, crop=crop, current_date=current_date)
-    country_daily = reduce_to_country_level(geo_daily, crop=crop, current_date=current_date)
-    param_dictionary = build_param_dictionary(geo_daily["param"].unique())
+    if cached_payload is None:
+        raw = load_csv_weather(csv_path)
+        prepared = prepare_weather_frame(raw)
+        current_date = prepared["date_release"].max().normalize()
+        geo_daily = enrich_geo_daily(prepared, crop=crop, current_date=current_date)
+        country_daily = reduce_to_country_level(geo_daily, crop=crop, current_date=current_date)
+        core_belt_daily = build_core_belt_daily(country_daily, crop=crop, current_date=current_date)
+        param_dictionary = build_param_dictionary(geo_daily["param"].unique())
+        snapshot = build_snapshot(geo_daily, current_date)
+        cached_payload = {
+            "raw": prepared,
+            "geo_daily": geo_daily,
+            "country_daily": country_daily,
+            "core_belt_daily": core_belt_daily,
+            "param_dictionary": param_dictionary,
+            "snapshot": snapshot,
+            "current_date": current_date,
+        }
+        write_prepared_cache(crop, file_signature, cached_payload)
+    else:
+        prepared = cached_payload["raw"]
+        geo_daily = cached_payload["geo_daily"]
+        country_daily = cached_payload["country_daily"]
+        core_belt_daily = cached_payload["core_belt_daily"]
+        param_dictionary = cached_payload["param_dictionary"]
+        snapshot = cached_payload["snapshot"]
+        current_date = cached_payload["current_date"]
 
     return CropDataset(
         crop=crop,
         raw=prepared,
         geo_daily=geo_daily,
         country_daily=country_daily,
+        core_belt_daily=core_belt_daily,
         param_dictionary=param_dictionary,
+        snapshot=snapshot,
         current_date=current_date,
         source_mode=source_mode,
         status_message=status_message,
@@ -69,6 +97,12 @@ def repo_root() -> Path:
 
 def data_dir() -> Path:
     path = repo_root() / "data"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def cache_dir() -> Path:
+    path = data_dir() / ".cache"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -103,6 +137,60 @@ def csv_file_signature(csv_path: Path | None) -> tuple[int, int] | tuple[()]:
     return (stat.st_mtime_ns, stat.st_size)
 
 
+def prepared_cache_path(crop: CropDefinition, file_signature: tuple[int, int]) -> Path:
+    mtime_ns, size = file_signature
+    filename = f"{crop.crop_id}_{CACHE_VERSION}_{mtime_ns}_{size}.pkl"
+    return cache_dir() / filename
+
+
+def read_prepared_cache(
+    crop: CropDefinition,
+    file_signature: tuple[int, int],
+) -> dict[str, object] | None:
+    if not file_signature:
+        return None
+
+    path = prepared_cache_path(crop, file_signature)
+    if not path.exists():
+        return None
+
+    try:
+        with path.open("rb") as handle:
+            payload = pickle.load(handle)
+    except Exception:
+        path.unlink(missing_ok=True)
+        return None
+
+    if not isinstance(payload, dict):
+        path.unlink(missing_ok=True)
+        return None
+    return payload
+
+
+def prune_prepared_cache(crop: CropDefinition, keep_path: Path) -> None:
+    pattern = f"{crop.crop_id}_{CACHE_VERSION}_*.pkl"
+    for path in cache_dir().glob(pattern):
+        if path != keep_path:
+            try:
+                path.unlink(missing_ok=True)
+            except PermissionError:
+                continue
+
+
+def write_prepared_cache(
+    crop: CropDefinition,
+    file_signature: tuple[int, int],
+    payload: dict[str, object],
+) -> None:
+    if not file_signature:
+        return
+
+    path = prepared_cache_path(crop, file_signature)
+    with path.open("wb") as handle:
+        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    prune_prepared_cache(crop, path)
+
+
 def describe_csv_path(csv_path: Path) -> str:
     try:
         return str(csv_path.relative_to(repo_root()))
@@ -119,7 +207,18 @@ def missing_feed_error(crop: CropDefinition) -> FileNotFoundError:
 
 
 def load_csv_weather(csv_path: Path) -> pd.DataFrame:
-    return pd.read_csv(csv_path)
+    return pd.read_csv(
+        csv_path,
+        usecols=["date", "date_release", "year_market", "param", "geo", "value"],
+        parse_dates=["date", "date_release"],
+        dtype={
+            "year_market": "string",
+            "param": "string",
+            "geo": "string",
+            "value": "float64",
+        },
+        low_memory=False,
+    )
 
 
 def prepare_weather_frame(raw: pd.DataFrame) -> pd.DataFrame:
@@ -139,7 +238,7 @@ def prepare_weather_frame(raw: pd.DataFrame) -> pd.DataFrame:
     frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
     frame = frame.dropna(subset=["date", "date_release", "param", "geo", "value"])
     frame = frame.sort_values(["date", "date_release", "param", "geo"])
-    frame = frame.groupby(["date", "geo", "param"], as_index=False).tail(1)
+    frame = frame.drop_duplicates(subset=["date", "geo", "param"], keep="last")
     return frame.reset_index(drop=True)
 
 
@@ -177,33 +276,21 @@ def enrich_geo_daily(
     if filtered.empty:
         return empty_geo_frame()
 
-    geo_level: list[str] = []
-    geo_label: list[str] = []
-    geo_weight: list[float] = []
-    country_label: list[str] = []
-    iso_alpha3: list[str] = []
+    geo_label_lookup = {country.code: country.label for country in crop.countries}
+    geo_label_lookup.update({region.geo: region.label for region in region_lookup.values()})
 
-    for geo in filtered["geo"]:
-        if geo in country_lookup:
-            country = country_lookup[geo]
-            geo_level.append("country")
-            geo_label.append(country.label)
-            geo_weight.append(100.0)
-        else:
-            region = region_lookup[geo]
-            country = region_country_lookup[geo]
-            geo_level.append("region")
-            geo_label.append(region.label)
-            geo_weight.append(region.weight)
+    geo_weight_lookup = {country.code: 100.0 for country in crop.countries}
+    geo_weight_lookup.update({region.geo: region.weight for region in region_lookup.values()})
 
-        country_label.append(country.label)
-        iso_alpha3.append(country.iso_alpha3)
-
-    filtered["country_label"] = country_label
-    filtered["iso_alpha3"] = iso_alpha3
-    filtered["geo_level"] = geo_level
-    filtered["geo_label"] = geo_label
-    filtered["geo_weight"] = geo_weight
+    filtered["country_label"] = filtered["country_code"].map(
+        {code: country.label for code, country in country_lookup.items()}
+    )
+    filtered["iso_alpha3"] = filtered["country_code"].map(
+        {code: country.iso_alpha3 for code, country in country_lookup.items()}
+    )
+    filtered["geo_level"] = np.where(filtered["geo"].isin(country_lookup), "country", "region")
+    filtered["geo_label"] = filtered["geo"].map(geo_label_lookup)
+    filtered["geo_weight"] = filtered["geo"].map(geo_weight_lookup).astype(float)
     filtered["period"] = np.where(filtered["date"] > current_date, "forecast", "actual")
 
     return filtered[
@@ -233,65 +320,90 @@ def reduce_to_country_level(
     if geo_daily.empty:
         return empty_geo_frame()
 
-    records: list[dict[str, object]] = []
-    for (date_value, country_code, param), group in geo_daily.groupby(
-        ["date", "country_code", "param"],
-        sort=True,
-    ):
-        exact = group[group["geo"] == country_code]
-        country = crop.country_lookup[country_code]
+    target_columns = list(empty_geo_frame().columns)
 
-        if not exact.empty:
-            selected = exact.iloc[-1]
-            records.append(
-                {
-                    "date": selected["date"],
-                    "date_release": selected["date_release"],
-                    "year_market": selected["year_market"],
-                    "country_code": country.code,
-                    "country_label": country.label,
-                    "iso_alpha3": country.iso_alpha3,
-                    "geo": country.code,
-                    "geo_label": country.label,
-                    "geo_level": "country",
-                    "geo_weight": 100.0,
-                    "param": param,
-                    "value": float(selected["value"]),
-                    "period": "forecast" if selected["date"] > current_date else "actual",
-                }
-            )
-            continue
+    exact = geo_daily[geo_daily["geo"] == geo_daily["country_code"]].copy()
+    if not exact.empty:
+        exact["geo"] = exact["country_code"]
+        exact["geo_label"] = exact["country_label"]
+        exact["geo_level"] = "country"
+        exact["geo_weight"] = 100.0
+        exact["period"] = np.where(exact["date"] > current_date, "forecast", "actual")
 
-        regional = group[group["geo_level"] == "region"].copy()
-        if regional.empty:
-            continue
+    regional = geo_daily[geo_daily["geo_level"] == "region"].copy()
+    if regional.empty:
+        return exact[target_columns].sort_values(["date", "geo", "param"]).reset_index(drop=True)
 
-        weights = regional["geo_weight"].astype(float)
-        weighted_value = (
-            float(np.average(regional["value"], weights=weights))
-            if float(weights.sum()) > 0
-            else float(regional["value"].mean())
+    regional["weighted_component"] = regional["value"] * regional["geo_weight"]
+    aggregated = (
+        regional.groupby(["date", "country_code", "param"], as_index=False)
+        .agg(
+            date_release=("date_release", "max"),
+            year_market=("year_market", "max"),
+            country_label=("country_label", "first"),
+            iso_alpha3=("iso_alpha3", "first"),
+            weighted_component=("weighted_component", "sum"),
+            weight_total=("geo_weight", "sum"),
+            mean_value=("value", "mean"),
         )
-        records.append(
-            {
-                "date": date_value,
-                "date_release": regional["date_release"].max(),
-                "year_market": regional["year_market"].dropna().iloc[-1]
-                if not regional["year_market"].dropna().empty
-                else None,
-                "country_code": country.code,
-                "country_label": country.label,
-                "iso_alpha3": country.iso_alpha3,
-                "geo": country.code,
-                "geo_label": country.label,
-                "geo_level": "country",
-                "geo_weight": 100.0,
-                "param": param,
-                "value": weighted_value,
-                "period": "forecast" if date_value > current_date else "actual",
-            }
-        )
+        .copy()
+    )
+    aggregated["value"] = np.where(
+        aggregated["weight_total"] > 0,
+        aggregated["weighted_component"] / aggregated["weight_total"],
+        aggregated["mean_value"],
+    )
+    aggregated["geo"] = aggregated["country_code"]
+    aggregated["geo_label"] = aggregated["country_label"]
+    aggregated["geo_level"] = "country"
+    aggregated["geo_weight"] = 100.0
+    aggregated["period"] = np.where(aggregated["date"] > current_date, "forecast", "actual")
 
-    return pd.DataFrame.from_records(records).sort_values(
-        ["date", "geo", "param"]
+    if not exact.empty:
+        exact_keys = exact[["date", "country_code", "param"]].drop_duplicates()
+        aggregated = aggregated.merge(
+            exact_keys.assign(has_exact=True),
+            on=["date", "country_code", "param"],
+            how="left",
+        )
+        aggregated = aggregated[aggregated["has_exact"] != True].drop(columns=["has_exact"])
+
+    aggregated = aggregated[target_columns]
+    combined = pd.concat([exact[target_columns], aggregated], ignore_index=True)
+    return combined.sort_values(["date", "geo", "param"]).reset_index(drop=True)
+
+
+def build_core_belt_daily(
+    country_daily: pd.DataFrame,
+    crop: CropDefinition,
+    current_date: pd.Timestamp,
+) -> pd.DataFrame:
+    if country_daily.empty:
+        return pd.DataFrame(columns=["date", "date_release", "param", "value", "period"])
+
+    weights = pd.Series(crop.country_weights, name="country_weight", dtype="float64")
+    scoped = country_daily[country_daily["country_code"].isin(weights.index)].copy()
+    if scoped.empty:
+        return pd.DataFrame(columns=["date", "date_release", "param", "value", "period"])
+
+    scoped["country_weight"] = scoped["country_code"].map(weights)
+    scoped["weighted_component"] = scoped["value"] * scoped["country_weight"]
+    aggregated = (
+        scoped.groupby(["date", "param"], as_index=False)
+        .agg(
+            date_release=("date_release", "max"),
+            weighted_component=("weighted_component", "sum"),
+            weight_total=("country_weight", "sum"),
+            mean_value=("value", "mean"),
+        )
+        .copy()
+    )
+    aggregated["value"] = np.where(
+        aggregated["weight_total"] > 0,
+        aggregated["weighted_component"] / aggregated["weight_total"],
+        aggregated["mean_value"],
+    )
+    aggregated["period"] = np.where(aggregated["date"] > current_date, "forecast", "actual")
+    return aggregated[["date", "date_release", "param", "value", "period"]].sort_values(
+        ["date", "param"]
     ).reset_index(drop=True)

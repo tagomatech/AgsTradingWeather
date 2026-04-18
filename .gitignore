@@ -5,6 +5,7 @@ __pycache__/
 .vs/
 .vscode/
 data/*.csv
+data/.cache/
 !data/.gitkeep
 *.pyc
 *.pyo

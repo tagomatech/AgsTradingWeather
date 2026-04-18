@@ -120,6 +120,7 @@ PALM_OIL = CropDefinition(
         "palmoil-t2m_mean-degree_c",
         "palmoil-t2m_max-degree_c",
         "palmoil-t2m_min-degree_c",
+        "palmoil-tp_sum-mm",
     ),
     default_map_param="palmoil-t2m_mean-degree_c",
     data_filename="palm_oil_weather_feed.csv",

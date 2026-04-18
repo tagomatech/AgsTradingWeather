@@ -118,3 +118,24 @@ def build_param_dictionary(params: Iterable[str]) -> pd.DataFrame:
         ["crop_label", "stat_order", "ui_metric_label", "raw_param"]
     ).reset_index(drop=True)
     return glossary.drop(columns=["stat_order"])
+
+
+def describe_window_measure(param: str | ParamDescriptor, window_days: int) -> str:
+    descriptor = parse_param_label(param) if isinstance(param, str) else param
+    if descriptor.statistic_code == "sum":
+        return f"trailing {int(window_days)}-day total"
+    return f"trailing {int(window_days)}-day average"
+
+
+def describe_window_column_label(param: str | ParamDescriptor, window_days: int) -> str:
+    descriptor = parse_param_label(param) if isinstance(param, str) else param
+    if descriptor.statistic_code == "sum":
+        return f"{int(window_days)}d total"
+    return f"{int(window_days)}d avg"
+
+
+def describe_latest_measure(param: str | ParamDescriptor) -> str:
+    descriptor = parse_param_label(param) if isinstance(param, str) else param
+    if descriptor.statistic_code == "sum":
+        return "latest daily total"
+    return "latest daily reading"
