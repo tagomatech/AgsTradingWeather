@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
 import math
+from copy import deepcopy
+from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -21,33 +25,37 @@ FORECAST_COLOR = "#c67a2d"
 BAND_COLOR = "rgba(84, 109, 120, 0.12)"
 DIVERGING_SCALE = ["#4d8ab0", "#f5efe5", "#c56e4d"]
 SEQUENTIAL_SCALE = ["#e2eef1", "#85a9b4", "#244c58"]
-REGION_COORDINATES = {
-    "idn-riau": (0.53, 101.45),
-    "idn-kalimantan_tengah": (-1.80, 113.50),
-    "idn-kalimantan_barat": (0.13, 111.10),
-    "idn-kalimantan_timur": (0.54, 116.42),
-    "idn-sumatera_selatan": (-3.20, 104.65),
-    "idn-sumatera_utara": (2.12, 99.55),
-    "idn-jambi": (-1.60, 103.61),
-    "idn-kalimantan_selatan": (-3.32, 115.09),
-    "idn-aceh": (4.69, 96.75),
-    "idn-bangka_belitung": (-2.74, 106.44),
-    "idn-bengkulu": (-3.79, 102.27),
-    "idn-sumatera_barat": (-0.95, 100.35),
-    "idn-lampung": (-4.55, 105.26),
-    "idn-kalimantan_utara": (3.07, 117.12),
-    "idn-papua": (-4.27, 138.08),
-    "mys-sabah": (5.42, 117.12),
-    "mys-sarawak": (2.92, 113.25),
-    "mys-johor": (1.76, 103.32),
-    "mys-pahang": (3.81, 102.33),
-    "mys-perak": (4.59, 101.09),
-    "mys-negeri_sembilan": (2.73, 102.25),
-    "mys-selangor": (3.35, 101.45),
-    "mys-trengganu": (5.31, 103.13),
-    "mys-kelantan": (5.39, 102.03),
-    "mys-kedah": (6.12, 100.37),
-    "mys-melaka": (2.19, 102.25),
+REGION_BOUNDARY_NAME = {
+    "idn-riau": "Riau",
+    "idn-kalimantan_tengah": "Central Kalimantan",
+    "idn-kalimantan_barat": "West Kalimantan",
+    "idn-kalimantan_timur": "East Kalimantan",
+    "idn-sumatera_selatan": "South Sumatra",
+    "idn-sumatera_utara": "North Sumatra",
+    "idn-jambi": "Jambi",
+    "idn-kalimantan_selatan": "South Kalimantan",
+    "idn-aceh": "Aceh",
+    "idn-bangka_belitung": "Bangka-Belitung Islands",
+    "idn-bengkulu": "Bengkulu",
+    "idn-sumatera_barat": "West Sumatra",
+    "idn-lampung": "Lampung",
+    "idn-kalimantan_utara": "North Kalimantan",
+    "idn-papua": "Papua",
+    "mys-sabah": "Sabah",
+    "mys-sarawak": "Sarawak",
+    "mys-johor": "Johor",
+    "mys-pahang": "Pahang",
+    "mys-perak": "Perak",
+    "mys-negeri_sembilan": "Negeri Sembilan",
+    "mys-selangor": "Selangor",
+    "mys-trengganu": "Terengganu",
+    "mys-kelantan": "Kelantan",
+    "mys-kedah": "Kedah",
+    "mys-melaka": "Malacca",
+}
+REGIONAL_GEOJSON_FILES = {
+    "IDN": Path(__file__).resolve().parent.parent / "data" / "geo" / "idn_adm1_simplified.geojson",
+    "MYS": Path(__file__).resolve().parent.parent / "data" / "geo" / "mys_adm1_simplified.geojson",
 }
 
 
@@ -149,6 +157,24 @@ def build_region_scope_frame(
     if country is None:
         return regional[regional["geo"] == scope].copy(), scope
     return regional[regional["country_code"] == country.code].copy(), country.label
+
+
+@lru_cache(maxsize=1)
+def load_regional_geojson() -> dict[str, object]:
+    features: list[dict[str, object]] = []
+    boundary_lookup = {name: geo for geo, name in REGION_BOUNDARY_NAME.items()}
+    for path in REGIONAL_GEOJSON_FILES.values():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for feature in payload.get("features", []):
+            feature_copy = deepcopy(feature)
+            shape_name = str(feature_copy.get("properties", {}).get("shapeName", ""))
+            geo_code = boundary_lookup.get(shape_name)
+            if geo_code is None:
+                continue
+            feature_copy["id"] = geo_code
+            feature_copy.setdefault("properties", {})["ags_geo"] = geo_code
+            features.append(feature_copy)
+    return {"type": "FeatureCollection", "features": features}
 
 
 def build_geo_overview_figure(
