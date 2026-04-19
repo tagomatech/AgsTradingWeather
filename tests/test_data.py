@@ -1,9 +1,9 @@
 import pandas as pd
 import pytest
 
-from agstradingapp.config import PALM_OIL
-from agstradingapp import data as data_module
-from agstradingapp.data import build_core_belt_daily, load_dataset
+from agstradingweatherapp.config import PALM_OIL
+from agstradingweatherapp import data as data_module
+from agstradingweatherapp.data import build_core_belt_daily, load_dataset
 
 
 def test_load_dataset_prefers_local_csv(monkeypatch, tmp_path):
@@ -37,7 +37,7 @@ def test_load_dataset_prefers_local_csv(monkeypatch, tmp_path):
         ]
     ).to_csv(csv_path, index=False)
 
-    monkeypatch.setenv("AGSTRADINGAPP_DATA_FILE", str(csv_path))
+    monkeypatch.setenv("AGSTRADINGWEATHERAPP_DATA_FILE", str(csv_path))
 
     dataset = load_dataset(PALM_OIL)
 
@@ -51,7 +51,7 @@ def test_load_dataset_raises_when_csv_is_missing(monkeypatch, tmp_path):
     fake_repo = tmp_path / "repo"
     fake_repo.mkdir()
     monkeypatch.setattr(data_module, "repo_root", lambda: fake_repo)
-    monkeypatch.delenv("AGSTRADINGAPP_DATA_FILE", raising=False)
+    monkeypatch.delenv("AGSTRADINGWEATHERAPP_DATA_FILE", raising=False)
 
     with pytest.raises(FileNotFoundError, match="Palm oil CSV feed not found"):
         load_dataset(PALM_OIL)
@@ -83,7 +83,7 @@ def test_load_dataset_finds_csv_in_current_working_directory(monkeypatch, tmp_pa
     fake_repo = tmp_path / "repo"
     fake_repo.mkdir()
     monkeypatch.setattr(data_module, "repo_root", lambda: fake_repo)
-    monkeypatch.delenv("AGSTRADINGAPP_DATA_FILE", raising=False)
+    monkeypatch.delenv("AGSTRADINGWEATHERAPP_DATA_FILE", raising=False)
     monkeypatch.chdir(tmp_path)
 
     dataset = load_dataset(PALM_OIL)

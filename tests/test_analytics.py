@@ -1,13 +1,13 @@
 import pandas as pd
 
-from agstradingapp.analytics import (
+from agstradingweatherapp.analytics import (
     build_rainfall_threshold_matrix,
     build_recent_context,
     build_snapshot,
     classify_issue,
     describe_comparison_mode,
 )
-from agstradingapp.config import PALM_OIL
+from agstradingweatherapp.config import PALM_OIL
 
 
 def test_classify_issue_uses_precipitation_labels():

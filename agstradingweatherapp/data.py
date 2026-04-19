@@ -108,7 +108,7 @@ def cache_dir() -> Path:
 
 
 def crop_csv_candidates(crop: CropDefinition) -> tuple[Path, ...]:
-    override = os.getenv("AGSTRADINGAPP_DATA_FILE")
+    override = os.getenv("AGSTRADINGWEATHERAPP_DATA_FILE")
     candidates: list[Path] = []
     if override:
         candidates.append(Path(override))

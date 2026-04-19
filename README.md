@@ -1,4 +1,4 @@
-# agstradingapp
+# agstradingweatherapp
 
 First pass of a crop weather monitor focused on palm oil in Indonesia and Malaysia.
 
@@ -32,7 +32,7 @@ Example:
 python app.py
 ```
 
-The app runs at `http://127.0.0.1:8052` as `agstradingapp`.
+The app runs at `http://127.0.0.1:8052` as `agstradingweatherapp`.
 
 ## Data
 

@@ -1,8 +1,8 @@
 import pandas as pd
 
-from agstradingapp.config import PALM_OIL
-from agstradingapp.data import enrich_geo_daily, prepare_weather_frame, reduce_to_country_level
-from agstradingapp.domain import parse_param_label
+from agstradingweatherapp.config import PALM_OIL
+from agstradingweatherapp.data import enrich_geo_daily, prepare_weather_frame, reduce_to_country_level
+from agstradingweatherapp.domain import parse_param_label
 
 
 def test_parse_param_label_extracts_expected_tokens():

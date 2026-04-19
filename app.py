@@ -10,21 +10,21 @@ from pathlib import Path
 import pandas as pd
 from dash import Dash, Input, Output, State, dash_table, dcc, html
 
-from agstradingapp.analytics import (
+from agstradingweatherapp.analytics import (
     build_recent_context,
     build_snapshot,
     describe_comparison_mode,
     filter_snapshot,
 )
-from agstradingapp.config import PALM_OIL
-from agstradingapp.data import load_dataset
-from agstradingapp.domain import (
+from agstradingweatherapp.config import PALM_OIL
+from agstradingweatherapp.data import load_dataset
+from agstradingweatherapp.domain import (
     describe_latest_measure,
     describe_window_column_label,
     describe_window_measure,
     parse_param_label,
 )
-from agstradingapp.figures import (
+from agstradingweatherapp.figures import (
     build_geo_map_figure,
     build_geo_ranking_figure,
     build_recent_context_figure,
@@ -97,12 +97,12 @@ TABLE_CELL_STYLE = {
 app = Dash(__name__, suppress_callback_exceptions=True)
 app.title = "AGSTRADINGWEATHERAPP | Palm Oil Desk"
 
-DASH_HOST = os.getenv("AGSTRADINGAPP_HOST", "127.0.0.1")
+DASH_HOST = os.getenv("AGSTRADINGWEATHERAPP_HOST", "127.0.0.1")
 APP_REVISION = str(Path(__file__).stat().st_mtime_ns)
 
 
 def resolve_dash_port() -> int:
-    explicit_port = os.getenv("AGSTRADINGAPP_PORT")
+    explicit_port = os.getenv("AGSTRADINGWEATHERAPP_PORT")
     if explicit_port:
         return int(explicit_port)
 
@@ -395,7 +395,7 @@ def render_streamlit_shell() -> None:
         if is_dash_server_reachable():
             return True
 
-        debug = os.getenv("AGSTRADINGAPP_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
+        debug = os.getenv("AGSTRADINGWEATHERAPP_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
         thread = threading.Thread(
             target=run_dash_server,
             kwargs={"debug": debug},
@@ -727,6 +727,6 @@ if __name__ == "__main__":
     if is_running_under_streamlit():
         render_streamlit_shell()
     else:
-        debug = os.getenv("AGSTRADINGAPP_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
+        debug = os.getenv("AGSTRADINGWEATHERAPP_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
         use_reloader = debug and threading.current_thread() is threading.main_thread()
         app.run(debug=debug, host=DASH_HOST, port=DASH_PORT, use_reloader=use_reloader)
