@@ -177,6 +177,40 @@ def load_regional_geojson() -> dict[str, object]:
     return {"type": "FeatureCollection", "features": features}
 
 
+def matched_geojson_bounds(geojson: dict[str, object], geo_codes: set[str]) -> tuple[float, float, float, float]:
+    lon_min, lat_min = math.inf, math.inf
+    lon_max, lat_max = -math.inf, -math.inf
+
+    for feature in geojson.get("features", []):
+        if feature.get("properties", {}).get("ags_geo") not in geo_codes:
+            continue
+        stack = [feature.get("geometry", {}).get("coordinates", [])]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, (list, tuple)) and current and isinstance(current[0], (int, float)):
+                lon, lat = float(current[0]), float(current[1])
+                lon_min = min(lon_min, lon)
+                lon_max = max(lon_max, lon)
+                lat_min = min(lat_min, lat)
+                lat_max = max(lat_max, lat)
+            elif isinstance(current, (list, tuple)):
+                stack.extend(current)
+
+    if not math.isfinite(lon_min):
+        return 95.0, 141.5, -9.5, 6.5
+    return lon_min, lon_max, lat_min, lat_max
+
+
+def map_center_and_zoom(lon_min: float, lon_max: float, lat_min: float, lat_max: float) -> tuple[dict[str, float], float]:
+    lon_span = max(lon_max - lon_min, 0.25)
+    lat_span = max(lat_max - lat_min, 0.25)
+    center = {"lon": (lon_min + lon_max) / 2.0, "lat": (lat_min + lat_max) / 2.0}
+    zoom_lon = math.log2(360.0 / lon_span)
+    zoom_lat = math.log2(170.0 / lat_span)
+    zoom = max(2.4, min(7.2, min(zoom_lon, zoom_lat) - 0.55))
+    return center, zoom
+
+
 def build_geo_overview_figure(
     snapshot: pd.DataFrame,
     map_param: str,
@@ -383,6 +417,9 @@ def build_geo_map_figure(
     filtered = snapshot[snapshot["param"] == map_param].copy()
     filtered["pct_normal"] = safe_percent_of_normal(filtered["window_mean"], filtered["reference_mean"])
     subset, title_scope = build_region_scope_frame(filtered, scope, crop)
+    geojson = load_regional_geojson()
+    available_geo = {feature["properties"]["ags_geo"] for feature in geojson.get("features", [])}
+    subset = subset[subset["geo"].isin(available_geo)].copy()
 
     if subset.empty:
         figure = go.Figure()
@@ -396,27 +433,8 @@ def build_geo_map_figure(
         )
         return apply_layout(figure, title="Regional map")
 
-    subset = subset.copy()
-    subset["lat"] = subset["geo"].map(lambda geo: REGION_COORDINATES.get(geo, (math.nan, math.nan))[0])
-    subset["lon"] = subset["geo"].map(lambda geo: REGION_COORDINATES.get(geo, (math.nan, math.nan))[1])
-    subset = subset.dropna(subset=["lat", "lon"]).copy()
-    if subset.empty:
-        figure = go.Figure()
-        figure.add_annotation(
-            text="Region coordinates are not available for this selection.",
-            showarrow=False,
-            x=0.5,
-            y=0.5,
-            xref="paper",
-            yref="paper",
-        )
-        return apply_layout(figure, title="Regional map")
-
     spec = geo_display_spec(subset, descriptor, display_mode)
     window_measure = describe_window_measure(descriptor, window_days).capitalize()
-    weight_span = max(float(subset["geo_weight"].max()) - float(subset["geo_weight"].min()), 0.01)
-    subset["color_value"] = spec["color_series"]
-    subset["marker_size"] = 15 + ((subset["geo_weight"] - subset["geo_weight"].min()) / weight_span) * 18
     subset["hover_text"] = (
         subset["geo_label"]
         + "<br>Weight: "
@@ -433,68 +451,31 @@ def build_geo_map_figure(
         + subset["issue_flag"]
     )
 
-    figure = go.Figure()
-    figure.add_trace(
-        go.Scattergeo(
-            lon=subset["lon"],
-            lat=subset["lat"],
-            text=subset["geo_label"],
-            customdata=subset[["hover_text"]],
-            hovertemplate="%{customdata[0]}<extra></extra>",
-            mode="markers",
-            marker=dict(
-                size=subset["marker_size"],
-                color=spec["color_series"],
-                colorscale=spec["colorscale"],
-                cmin=spec["range_color"][0],
-                cmax=spec["range_color"][1],
-                colorbar=dict(title=spec["color_title"]),
-                line=dict(color="rgba(36, 55, 64, 0.55)", width=1.2),
-                opacity=0.95,
-            ),
-            showlegend=False,
-        )
-    )
+    lon_min, lon_max, lat_min, lat_max = matched_geojson_bounds(geojson, set(subset["geo"]))
+    center, zoom = map_center_and_zoom(lon_min, lon_max, lat_min, lat_max)
 
-    if scope not in {"all", *crop.country_codes} and scope in set(subset["geo"]):
-        selected = subset[subset["geo"] == scope].iloc[0]
-        figure.add_trace(
-            go.Scattergeo(
-                lon=[selected["lon"]],
-                lat=[selected["lat"]],
-                customdata=[[selected["hover_text"]]],
-                hovertemplate="%{customdata[0]}<extra></extra>",
-                mode="markers",
-                marker=dict(
-                    size=[float(selected["marker_size"]) + 8],
-                    color=[selected["color_value"] if "color_value" in selected else selected["zscore"]],
-                    colorscale=spec["colorscale"],
-                    cmin=spec["range_color"][0],
-                    cmax=spec["range_color"][1],
-                    line=dict(color="#243740", width=3),
-                    opacity=1.0,
-                    showscale=False,
-                ),
-                showlegend=False,
-            )
-        )
-
-    lat_pad = max(1.4, (float(subset["lat"].max()) - float(subset["lat"].min())) * 0.28)
-    lon_pad = max(1.8, (float(subset["lon"].max()) - float(subset["lon"].min())) * 0.20)
-    figure.update_geos(
-        projection_type="mercator",
-        showcountries=True,
-        countrycolor="rgba(39, 57, 47, 0.35)",
-        showcoastlines=True,
-        coastlinecolor="rgba(39, 57, 47, 0.35)",
-        showland=True,
-        landcolor="#f1ece3",
-        showocean=True,
-        oceancolor="#edf4f5",
-        bgcolor="rgba(0,0,0,0)",
-        lataxis_range=[float(subset["lat"].min()) - lat_pad, float(subset["lat"].max()) + lat_pad],
-        lonaxis_range=[float(subset["lon"].min()) - lon_pad, float(subset["lon"].max()) + lon_pad],
+    figure = px.choropleth_map(
+        subset,
+        geojson=geojson,
+        locations="geo",
+        featureidkey="properties.ags_geo",
+        color=spec["color_series"],
+        hover_name="geo_label",
+        custom_data=["hover_text"],
+        color_continuous_scale=spec["colorscale"],
+        range_color=spec["range_color"],
+        center=center,
+        zoom=zoom,
+        map_style="carto-positron",
+        opacity=0.78,
     )
+    figure.update_traces(
+        marker_line_color="rgba(36, 55, 64, 0.55)",
+        marker_line_width=1.0,
+        hovertemplate="%{customdata[0]}<extra></extra>",
+    )
+    figure.update_layout(coloraxis_colorbar=dict(title=spec["color_title"]))
+
     return apply_layout(
         figure,
         title=(

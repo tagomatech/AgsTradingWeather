@@ -120,6 +120,9 @@ body {
   margin-top: 14px;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   align-items: start;
+  position: relative;
+  z-index: 20000;
+  overflow: visible;
 }
 
 .control-card--wide {
@@ -130,6 +133,8 @@ body {
   margin-top: 14px;
   grid-template-columns: minmax(0, 1.2fr) minmax(360px, 0.92fr);
   align-items: start;
+  position: relative;
+  z-index: 1;
 }
 
 .toolbar-shell--secondary {
@@ -138,6 +143,8 @@ body {
 
 .dashboard-stack {
   margin-top: 12px;
+  position: relative;
+  z-index: 1;
 }
 
 .control-card,
@@ -161,8 +168,18 @@ body {
 .control-card,
 .toolbar-card {
   position: relative;
-  z-index: 20;
+  z-index: 20010;
   overflow: visible;
+  backdrop-filter: none;
+}
+
+.control-card:focus-within,
+.toolbar-card:focus-within,
+.control-card:has(.is-open),
+.toolbar-card:has(.is-open),
+.control-card:has(.Select-menu-outer),
+.toolbar-card:has(.Select-menu-outer) {
+  z-index: 12000;
 }
 
 .panel,
@@ -179,17 +196,6 @@ body {
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--muted);
-}
-
-.toolbar-dropdown {
-  margin-top: 8px;
-}
-
-.control-dropdown,
-.toolbar-dropdown,
-.Select {
-  position: relative;
-  z-index: 30;
 }
 
 .toolbar-pills {
@@ -233,29 +239,13 @@ body {
   padding: 8px 10px;
 }
 
-.Select-control,
-.Select-menu-outer,
-.Select-menu,
-.VirtualizedSelectFocusedOption,
-.toolbar-dropdown .Select-control {
-  border-radius: 14px !important;
+.toolbar-pills--dense {
+  gap: 6px;
 }
 
-.Select-menu-outer,
-.Select-menu {
-  z-index: 9999 !important;
-}
-
-.Select-control {
-  border: 1px solid rgba(71, 95, 104, 0.16) !important;
-  background: var(--panel-strong) !important;
-  min-height: 42px !important;
-}
-
-.Select-placeholder,
-.Select-value-label,
-.Select-input > input {
-  color: var(--ink) !important;
+.toolbar-pills--dense label {
+  white-space: normal;
+  line-height: 1.25;
 }
 
 .kpi-grid {
@@ -299,6 +289,23 @@ body {
 
 .panel-copy--tight {
   margin-bottom: 10px;
+}
+
+.signal-threshold-note {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(71, 95, 104, 0.12);
+  background: rgba(245, 249, 250, 0.92);
+}
+
+.signal-threshold-title {
+  margin-bottom: 6px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent-deep);
 }
 
 .panel--guide {

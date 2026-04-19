@@ -493,12 +493,11 @@ def build_dashboard_layout() -> html.Div:
                         className="control-card",
                         children=[
                             html.Div("Country", className="toolbar-label"),
-                            dcc.Dropdown(
+                            dcc.RadioItems(
                                 id="country-filter",
                                 options=COUNTRY_OPTIONS,
                                 value=DEFAULT_COUNTRY,
-                                clearable=False,
-                                className="toolbar-dropdown control-dropdown",
+                                className="toolbar-pills toolbar-pills--compact",
                             ),
                         ],
                     ),
@@ -506,12 +505,11 @@ def build_dashboard_layout() -> html.Div:
                         className="control-card",
                         children=[
                             html.Div("Area", className="toolbar-label"),
-                            dcc.Dropdown(
+                            dcc.RadioItems(
                                 id="scope-filter",
                                 options=build_scope_options(DEFAULT_COUNTRY),
                                 value=DEFAULT_SCOPE,
-                                clearable=False,
-                                className="toolbar-dropdown control-dropdown",
+                                className="toolbar-pills toolbar-pills--compact toolbar-pills--dense",
                             ),
                         ],
                     ),
@@ -519,12 +517,11 @@ def build_dashboard_layout() -> html.Div:
                         className="control-card",
                         children=[
                             html.Div("Metric", className="toolbar-label"),
-                            dcc.Dropdown(
+                            dcc.RadioItems(
                                 id="metric-filter",
                                 options=METRIC_OPTIONS,
                                 value=DEFAULT_METRIC,
-                                clearable=False,
-                                className="toolbar-dropdown control-dropdown",
+                                className="toolbar-pills toolbar-pills--compact toolbar-pills--dense",
                             ),
                         ],
                     ),
@@ -532,12 +529,11 @@ def build_dashboard_layout() -> html.Div:
                         className="control-card",
                         children=[
                             html.Div("Show As", className="toolbar-label"),
-                            dcc.Dropdown(
+                            dcc.RadioItems(
                                 id="geo-view-filter",
                                 options=GEO_VIEW_OPTIONS,
                                 value=DEFAULT_GEO_VIEW,
-                                clearable=False,
-                                className="toolbar-dropdown control-dropdown",
+                                className="toolbar-pills toolbar-pills--compact",
                             ),
                         ],
                     ),
@@ -614,6 +610,19 @@ def build_dashboard_layout() -> html.Div:
                         children=[
                             html.Div("Current Issue Table", className="panel-title"),
                             html.P(DEFAULT_VIEW[1], className="panel-copy", id="issues-copy"),
+                            html.Div(
+                                className="signal-threshold-note",
+                                children=[
+                                    html.Div("Signal Thresholds", className="signal-threshold-title"),
+                                    html.P(
+                                        "Signals use z-score cutoffs on the selected window/comparison basis. "
+                                        "Precipitation: Wet stress >= +1.8, Wet watch >= +1.0, Dry watch <= -1.0, Dry stress <= -1.8. "
+                                        "Temperature: Heat stress >= +1.8, Warm watch >= +1.0, Cool watch <= -1.0, Cool stress <= -1.8. "
+                                        "Values between -1.0 and +1.0 are shown as Normal.",
+                                        className="panel-copy panel-copy--tight",
+                                    ),
+                                ],
+                            ),
                             dash_table.DataTable(
                                 id="issues-table",
                                 columns=DEFAULT_VIEW[2],
